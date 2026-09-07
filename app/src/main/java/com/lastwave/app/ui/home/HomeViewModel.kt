@@ -78,7 +78,7 @@ fun HomeUiState.visibleRows(): List<HomeRow> {
             val rows = mutableListOf<HomeRow>()
             nowPlaying?.let { rows += HomeRow.Track(it, badge = null) }
 
-            val dayGroups = dated.groupBy { dateKeyOf(it.timestampMillis!!) }
+            val dayGroups = dated.groupBy { dateKeyOf(it.timestampMillis ?: 0L) }
             dayGroups.forEach { (_, tracksInDay) ->
                 val firstTrackInDay = tracksInDay.firstOrNull()
                 if (firstTrackInDay != null && firstTrackInDay.timestampMillis != null) {

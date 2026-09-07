@@ -20,9 +20,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -163,16 +161,13 @@ fun PlaylistDetailScreen(
         }
     }
 
-    var cachedPlaylist by remember(playlistId) {
-        mutableStateOf(
-            state.detailPlaylist?.takeIf { it.id == playlistId }
-                ?: state.playlists.firstOrNull { it.id == playlistId }
-        )
-    }
     val currentFound = state.detailPlaylist?.takeIf { it.id == playlistId }
         ?: state.playlists.firstOrNull { it.id == playlistId }
-    if (currentFound != null) {
-        cachedPlaylist = currentFound
+    var cachedPlaylist by remember(playlistId) {
+        mutableStateOf(currentFound)
+    }
+    LaunchedEffect(currentFound) {
+        if (currentFound != null) cachedPlaylist = currentFound
     }
     val playlist = currentFound ?: cachedPlaylist
 
@@ -303,6 +298,13 @@ fun PlaylistDetailScreen(
                         .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 150.dp)
                         .padding(horizontal = 4.dp),
                 ) {
+                    // Old-HiFi analog VU on top of the playlist hero.
+                    // Real bass when the PCM tap flows, simulated groove otherwise.
+                    com.lastwave.app.ui.common.AnalogVuMeter(
+                        isPlaying = playbackState.isPlaying,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                        level = com.lastwave.app.ui.common.rememberRealBassLevel(playbackState.isPlaying),
+                    )
                     // Big Bold Playlist Title (overlaid in hero)
                     Text(
                         text = playlist.title,
@@ -1035,18 +1037,6 @@ private fun NativeTrackRow(
                     ),
                 ),
             )
-            .border(
-                BorderStroke(
-                    1.dp,
-                    Brush.horizontalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.40f),
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                        ),
-                    ),
-                ),
-                shape = RoundedCornerShape(14.dp),
-            )
             .graphicsLayer {
                 scaleX = rowScale
                 scaleY = rowScale
@@ -1062,7 +1052,6 @@ private fun NativeTrackRow(
     }
 
     Surface(
-        onClick = onClick,
         shape = RoundedCornerShape(14.dp),
         color = Color.Transparent,
         modifier = rowModifier,
