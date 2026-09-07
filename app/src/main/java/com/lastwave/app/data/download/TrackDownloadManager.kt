@@ -130,7 +130,12 @@ class TrackDownloadManager @Inject constructor(
         const val EXTRA_DOWNLOAD_TITLE = "download_title"
         const val EXTRA_DOWNLOAD_ARTIST = "download_artist"
         const val EXTRA_NAVIGATE_TO = "navigate_to"
-        private const val PUBLIC_DIR_NAME = "LastWave"
+        /** Public `Music/` subdirectory downloads are written to. Public so the
+         * playback layer can probe it as an offline fallback without
+         * hard-coding the directory. */
+        const val PUBLIC_DIR_NAME = "LastWave"
+        /** Audio extensions recognized as playable downloads, in probe order. */
+        val DOWNLOAD_AUDIO_EXTENSIONS = listOf("flac", "m4a", "opus", "mp3", "webm")
         private const val DOWNLOAD_BUFFER_SIZE = 512 * 1024 // 512 KB
         private const val PARALLEL_YOUTUBE_PARTS = 4
         private const val MIN_PARALLEL_DOWNLOAD_BYTES = 2L * 1024 * 1024
@@ -144,6 +149,11 @@ class TrackDownloadManager @Inject constructor(
 
         fun makeDownloadKey(title: String, artist: String): String =
             "${artist.trim().lowercase()}_${title.trim().lowercase()}"
+
+        /** Filename sanitization shared by the downloader and the playback
+         * offline fallback so both sides resolve the same on-disk name. */
+        fun sanitizeDownloadFilename(name: String): String =
+            name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "track" }
     }
 
     // Dedicated HTTP client with extended timeouts and high-throughput connection pooling
@@ -232,8 +242,7 @@ class TrackDownloadManager @Inject constructor(
         val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), PUBLIC_DIR_NAME)
         if (publicDir.exists() && publicDir.isDirectory) {
             val sanitizedBase = sanitizeFilename("${artist.trim()} - ${title.trim()}")
-            val candidateExtensions = listOf("flac", "m4a", "opus", "mp3", "webm")
-            if (candidateExtensions.any { ext ->
+            if (DOWNLOAD_AUDIO_EXTENSIONS.any { ext ->
                     val f = File(publicDir, "$sanitizedBase.$ext")
                     f.exists() && f.length() > 0
                 }
@@ -309,8 +318,7 @@ class TrackDownloadManager @Inject constructor(
                 val publicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), PUBLIC_DIR_NAME)
                 if (publicDir.exists() && publicDir.isDirectory) {
                     val sanitizedBase = sanitizeFilename("${artist.trim()} - ${title.trim()}")
-                    val candidateExtensions = listOf("flac", "m4a", "opus", "mp3", "webm")
-                    val existingFile = candidateExtensions.map { File(publicDir, "$sanitizedBase.$it") }
+                    val existingFile = DOWNLOAD_AUDIO_EXTENSIONS.map { File(publicDir, "$sanitizedBase.$it") }
                         .firstOrNull { it.exists() && it.length() > 0 }
                     if (existingFile != null) {
                         activeKeys.remove(key)
@@ -1696,5 +1704,5 @@ class TrackDownloadManager @Inject constructor(
     }
 
     private fun sanitizeFilename(title: String): String =
-        title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "track" }
+        sanitizeDownloadFilename(title)
 }
