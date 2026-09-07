@@ -15,7 +15,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import com.lastwave.app.ui.theme.liquidGlassSource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -58,6 +57,9 @@ class ArtistAlbumNavBridge @Inject constructor(val navigator: ArtistAlbumNavigat
 
 @HiltViewModel
 class AppRouteNavBridge @Inject constructor(val routeNavigator: AppRouteNavigator) : androidx.lifecycle.ViewModel()
+
+@HiltViewModel
+class NetworkNavBridge @Inject constructor(val networkMonitor: com.lastwave.app.data.network.NetworkMonitor) : androidx.lifecycle.ViewModel()
 
 @Composable
 fun LastWaveNavHost(
@@ -123,7 +125,7 @@ fun LastWaveNavHost(
 
     NavHost(
         navController = navController,
-        modifier = if (currentRoute == Screen.MainShell.route) Modifier else Modifier.liquidGlassSource(),
+        modifier = Modifier,
         startDestination = Screen.Splash.route,
         enterTransition = { ExpressiveMotion.forwardEnter() },
         exitTransition = { ExpressiveMotion.forwardExit() },
@@ -143,8 +145,17 @@ fun LastWaveNavHost(
         composable(Screen.Splash.route) {
             val authViewModel: AuthViewModel = hiltViewModel()
             val authState by authViewModel.authState.collectAsStateWithLifecycle()
+            val networkBridge: NetworkNavBridge = hiltViewModel()
+            val isOnline by networkBridge.networkMonitor.isOnline.collectAsStateWithLifecycle()
 
-            LaunchedEffect(authState) {
+            LaunchedEffect(authState, isOnline) {
+                // If no internet connection is present, immediately open download tab directly!
+                if (!networkBridge.networkMonitor.isCurrentlyConnected() || !isOnline) {
+                    navController.navigate(Screen.MainShell.route) {
+                        popUpTo(Screen.Splash.route) { inclusive = true }
+                    }
+                    return@LaunchedEffect
+                }
                 when (authState) {
                     is AuthState.SignedIn -> navController.navigate(Screen.MainShell.route) {
                         popUpTo(Screen.Splash.route) { inclusive = true }
@@ -184,6 +195,9 @@ fun LastWaveNavHost(
                 onSignOut = authViewModel::signOut,
                 onRestoreBackupAndSignIn = authViewModel::beginRestoreAndSignIn,
                 onDismissError = authViewModel::dismissError,
+                onOpenDownloads = {
+                    navController.navigate(Screen.Downloads.route)
+                },
             )
         }
 

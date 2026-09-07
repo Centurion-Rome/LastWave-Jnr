@@ -655,7 +655,7 @@ private fun MiniPlayer(
     // Liquid Glass dressing for the floating mini player (no-op when the
     // experimental setting is off — see ui/theme/LiquidGlass.kt).
     val liquidGlass = LocalLiquidGlass.current
-    val backdrop = LocalLiquidGlassOverlayBackdrop.current
+    val backdrop = LocalLiquidGlassBackdrop.current
     var dragX by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     var dragY by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     val shownX by animateFloatAsState(dragX, ExpressiveMotion.spatialSpring(), label = "miniPlayerX")

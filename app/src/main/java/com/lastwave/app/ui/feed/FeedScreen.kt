@@ -168,7 +168,6 @@ fun FeedScreen(
         ) {
             ExpressiveHeader(
                 title = "Home",
-                subtitle = headerSubtitle.takeIf { it.isNotBlank() },
                 actions = {
                     HeaderActionIcon(Icons.Filled.Explore, "Discover Radar", onOpenDiscover)
                     HeaderActionIcon(Icons.Filled.Search, "Search", onOpenSearch)
@@ -205,17 +204,29 @@ fun FeedScreen(
                     verticalArrangement = Arrangement.spacedBy(24.dp),
                 ) {
                     item(key = "hero") {
-                        ForYouHero(
-                            userName = state.feedData.userName ?: state.feedData.ytAccountName,
-                            quickPicks = state.feedData.quickPicks,
-                            topArtists = state.feedData.topArtists,
-                            tasteTags = state.feedData.tasteTags,
-                            spotlight = state.feedData.spotlight,
-                            hasPersonalContent = state.feedData.hasPersonalContent,
-                            onPlay = { viewModel.playTracksQueue(state.feedData.quickPicks, 0, "For You") },
-                            onShuffle = { viewModel.shuffleTracksQueue(state.feedData.quickPicks, "For You") },
-                            onOpenGenerator = onOpenGenerator,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (headerSubtitle.isNotBlank()) {
+                                Text(
+                                    text = headerSubtitle,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 18.dp),
+                                )
+                            }
+                            ForYouHero(
+                                userName = state.feedData.userName ?: state.feedData.ytAccountName,
+                                quickPicks = state.feedData.quickPicks,
+                                topArtists = state.feedData.topArtists,
+                                tasteTags = state.feedData.tasteTags,
+                                spotlight = state.feedData.spotlight,
+                                hasPersonalContent = state.feedData.hasPersonalContent,
+                                onPlay = { viewModel.playTracksQueue(state.feedData.quickPicks, 0, "For You") },
+                                onShuffle = { viewModel.shuffleTracksQueue(state.feedData.quickPicks, "For You") },
+                                onOpenGenerator = onOpenGenerator,
+                            )
+                        }
                     }
 
                     if (state.feedData.quickTiles.isNotEmpty()) {
@@ -1331,23 +1342,13 @@ private fun FeedMediaCard(
                 },
             ) {
                 Box(Modifier.fillMaxSize()) {
-                    if (!artworkUrl.isNullOrBlank()) {
-                        AsyncImage(
-                            model = artworkUrl,
-                            contentDescription = title,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(
-                                fallbackIcon,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.size(38.dp),
-                            )
-                        }
-                    }
+                    ArtworkImage(
+                        name = title,
+                        artist = subtitle,
+                        embeddedUrl = artworkUrl,
+                        fallbackIcon = fallbackIcon,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     if (badgeText != null) {
                         Surface(
                             shape = CircleShape,
@@ -1557,23 +1558,13 @@ private fun ChartTrackCard(
                 },
             ) {
                 Box(Modifier.fillMaxSize()) {
-                    if (!track.artworkUrl.isNullOrBlank()) {
-                        AsyncImage(
-                            model = track.artworkUrl,
-                            contentDescription = track.title,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(
-                                Icons.Filled.TrendingUp,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        }
-                    }
+                    ArtworkImage(
+                        name = track.title,
+                        artist = track.artist,
+                        embeddedUrl = track.artworkUrl,
+                        fallbackIcon = Icons.Filled.TrendingUp,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -1999,17 +1990,17 @@ private fun FeedSectionHeader(
             }
         }
         if (actionText != null && onActionClick != null) {
+            val liquidGlass = LocalLiquidGlass.current
             Surface(
                 onClick = {
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     onActionClick()
                 },
                 shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+                color = liquidGlassContainerColor(
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
                 ),
+                modifier = Modifier.liquidGlassChrome(CircleShape, liquidGlass),
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),

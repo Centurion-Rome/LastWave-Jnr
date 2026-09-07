@@ -11,7 +11,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.lastwave.app.data.repository.ThemeUiState
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.backdrops.rememberCanvasBackdrop
 
 /**
@@ -37,14 +36,14 @@ fun LastWaveTheme(
                 window.navigationBarColor = android.graphics.Color.TRANSPARENT
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
                 WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = false
-            // Setting navigationBarColor to TRANSPARENT above is not enough on
-            // its own: Android 10+ automatically draws its own translucent
-            // black scrim over a transparent nav bar ("contrast enforcement")
-            // to keep the gesture pill visible against arbitrary content —
-            // THAT scrim is the visible black strip. Disabling enforcement
-            // here is what actually removes it; without this line the app
-            // background never reaches the true bottom of the display no
-            // matter what padding or Surface backgrounds are added elsewhere.
+                // Setting navigationBarColor to TRANSPARENT above is not enough on
+                // its own: Android 10+ automatically draws its own translucent
+                // black scrim over a transparent nav bar ("contrast enforcement")
+                // to keep the gesture pill visible against arbitrary content —
+                // THAT scrim is the visible black strip. Disabling enforcement
+                // here is what actually removes it; without this line the app
+                // background never reaches the true bottom of the display no
+                // matter what padding or Surface backgrounds are added elsewhere.
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                     window.isStatusBarContrastEnforced = false
                     window.isNavigationBarContrastEnforced = false
@@ -66,10 +65,9 @@ fun LastWaveTheme(
                 if (isLiquidGlassBackdropSupported()) {
                     val backgroundColor = MaterialTheme.colorScheme.background
                     val backgroundBackdrop = rememberCanvasBackdrop { drawRect(backgroundColor) }
-                    val contentBackdrop = rememberLayerBackdrop()
                     CompositionLocalProvider(
                         LocalLiquidGlassBackdrop provides backgroundBackdrop,
-                        LocalLiquidGlassOverlayBackdrop provides contentBackdrop,
+                        LocalLiquidGlassOverlayBackdrop provides null,
                     ) {
                         content()
                     }

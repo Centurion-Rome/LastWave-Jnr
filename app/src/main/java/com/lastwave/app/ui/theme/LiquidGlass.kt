@@ -86,6 +86,19 @@ fun Modifier.liquidGlassChrome(
     if (!enabled) return this
     if (!isLiquidGlassBackdropSupported() || backdrop == null) return legacyLiquidGlassChrome(shape, true)
 
+    if (backdrop is LayerBackdrop) {
+        val isAttached = runCatching {
+            val field = backdrop.javaClass.getDeclaredField("layerCoordinates\$delegate")
+            field.isAccessible = true
+            val state = field.get(backdrop) as? androidx.compose.runtime.State<*>
+            val coords = state?.value as? androidx.compose.ui.layout.LayoutCoordinates
+            coords?.isAttached == true
+        }.getOrDefault(false)
+        if (!isAttached) {
+            return legacyLiquidGlassChrome(shape, true)
+        }
+    }
+
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val tint = MaterialTheme.colorScheme.surface.copy(alpha = if (dark) 0.24f else 0.14f)
     val health = remember(backdrop) { GlassEffectHealth() }
@@ -98,7 +111,7 @@ fun Modifier.liquidGlassChrome(
                 try {
                     colorControls(saturation = if (dark) 1.18f else 1.08f)
                     blur(preset.blur.dp.toPx())
-                } catch (_: RuntimeException) {
+                } catch (_: Throwable) {
                     health.blurAvailable = false
                     renderEffect = null
                 }
@@ -110,7 +123,7 @@ fun Modifier.liquidGlassChrome(
                 val reducedPadding = padding
                 try {
                     lens(preset.lensHeight.dp.toPx(), preset.lensAmount.dp.toPx())
-                } catch (_: RuntimeException) {
+                } catch (_: Throwable) {
                     health.lensAvailable = false
                     renderEffect = reducedEffect
                     padding = reducedPadding
@@ -126,6 +139,9 @@ fun Modifier.liquidGlassChrome(
 /** Retained for Android 10/11, software rendering and surfaces without a backdrop. */
 private fun Modifier.legacyLiquidGlassChrome(shape: Shape, enabled: Boolean): Modifier =
     if (!enabled) this else drawWithCache {
+        if (size.width <= 0f || size.height <= 0f) {
+            return@drawWithCache onDrawWithContent { drawContent() }
+        }
         val outline = shape.createOutline(size, layoutDirection, this)
         val path = when (outline) {
             is Outline.Rounded -> Path().apply { addRoundRect(outline.roundRect) }
