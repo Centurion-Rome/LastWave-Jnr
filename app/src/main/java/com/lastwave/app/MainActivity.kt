@@ -38,6 +38,8 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private val audioMediaPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called before super.onCreate() and before setContent().
         val splashScreen = runCatching { installSplashScreen() }
@@ -82,6 +84,15 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
         ) {
             runCatching { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
                 .onFailure { android.util.Log.w(STARTUP_TAG, "Notification permission request skipped", it) }
+        }
+        // Android 13+: offline playback of previously downloaded files in
+        // shared storage (Music/LastWave) requires this to resolve orphaned
+        // files via MediaStore when the download database has no record.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching { audioMediaPermission.launch(Manifest.permission.READ_MEDIA_AUDIO) }
+                .onFailure { android.util.Log.w(STARTUP_TAG, "Audio media permission request skipped", it) }
         }
 
         setContent {

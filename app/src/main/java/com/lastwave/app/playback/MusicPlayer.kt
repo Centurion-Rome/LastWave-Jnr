@@ -1,10 +1,12 @@
 package com.lastwave.app.playback
 
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import android.provider.MediaStore
 import androidx.annotation.MainThread
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -2078,54 +2080,185 @@ class MusicPlayer @Inject constructor(
         val artist = track.artist.trim()
         if (title.isBlank() || artist.isBlank()) return null
 
-        val trackKey = "${artist.lowercase()}_${title.lowercase()}"
+        val trackKey = OfflinePlaybackResolver.makeDownloadKey(title, artist)
         val downloaded = runCatching {
             val dao = downloadedTrackDao.get()
             dao.findByTrackKey(trackKey) ?: dao.findByTitleAndArtist(title, artist)
+        }.getOrNull()
+
+        if (downloaded != null) {
+            val uriString = OfflinePlaybackResolver.rawLocalUriString(downloaded)
+            if (uriString != null && isLocalUriAccessible(uriString)) {
+                val playbackUri = OfflinePlaybackResolver.toPlaybackUriString(uriString)
+                return buildLocalDownloadStream(
+                    trackKey = trackKey,
+                    playbackUri = playbackUri,
+                    filePath = downloaded.filePath,
+                    formatBadge = downloaded.formatBadge,
+                    bitrateKbps = downloaded.bitrateKbps,
+                    isLossless = downloaded.isLossless,
+                )
+            }
+            // Stale database record; file was deleted externally outside the app.
+            // Fall through to the on-disk probe below before giving up to remote.
+            runCatching { downloadedTrackDao.get().delete(downloaded) }
+        }
+
+        // Second chance when the Room lookup misses (history cleared,
+        // reinstall, sync not yet run) or the stored row was stale: probe
+        // MediaStore.Audio for the downloader's public file first. On
+        // Android 13+ direct File access to shared storage is gated behind
+        // READ_MEDIA_AUDIO, so a content:// URI is the only playable handle
+        // for orphaned files (DB row gone, file still on disk).
+        findPublicDownloadContentUri(title, artist)?.let { (contentUriString, displayName) ->
+            return buildLocalDownloadStream(
+                trackKey = trackKey,
+                playbackUri = contentUriString,
+                filePath = displayName,
+                formatBadge = null,
+                bitrateKbps = null,
+                isLossless = displayName.endsWith(".flac", ignoreCase = true),
+            )
+        }
+
+        // Legacy same-install / pre-Android 10 fallback: direct File probe of
+        // the downloader's public directory.
+        val fallbackFile = runCatching {
+            val musicDir = File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_MUSIC,
+                ),
+                com.lastwave.app.data.download.TrackDownloadManager.PUBLIC_DIR_NAME,
+            )
+            OfflinePlaybackResolver.findPublicDownloadFile(
+                musicDir = musicDir,
+                title = title,
+                artist = artist,
+                sanitize = com.lastwave.app.data.download.TrackDownloadManager::sanitizeDownloadFilename,
+                extensions = com.lastwave.app.data.download.TrackDownloadManager.DOWNLOAD_AUDIO_EXTENSIONS,
+            )
         }.getOrNull() ?: return null
 
-        val uriString = downloaded.mediaStoreUri?.takeIf(String::isNotBlank)
-            ?: downloaded.filePath.takeIf(String::isNotBlank)
-            ?: return null
+        return buildLocalDownloadStream(
+            trackKey = trackKey,
+            playbackUri = OfflinePlaybackResolver.toPlaybackUriString(fallbackFile.absolutePath),
+            filePath = fallbackFile.absolutePath,
+            formatBadge = null,
+            bitrateKbps = null,
+            isLossless = fallbackFile.extension.equals("flac", ignoreCase = true),
+        )
+    }
 
-        val isAccessible = when {
-            uriString.startsWith("content://") -> runCatching {
-                appContext.contentResolver.openInputStream(Uri.parse(uriString))?.use { }
-                true
-            }.getOrDefault(false)
-            else -> runCatching {
-                val file = if (uriString.startsWith("file://")) {
-                    File(Uri.parse(uriString).path.orEmpty())
-                } else {
-                    File(uriString)
-                }
-                file.exists() && file.length() > 0
-            }.getOrDefault(false)
-        }
-
-        if (!isAccessible) {
-            // Stale database record; file was deleted externally outside the app
-            runCatching { downloadedTrackDao.get().delete(downloaded) }
-            return null
-        }
-
-        val playbackUri = if (uriString.startsWith("/") && !uriString.startsWith("file://")) {
-            Uri.fromFile(File(uriString)).toString()
+    /**
+     * MediaStore probe for an orphaned download: finds
+     * `"artist - title".ext` under the downloader's public directory without
+     * consulting Room, and returns its playable `content://` URI plus display
+     * name. Prefers rows whose relative path contains
+     * [TrackDownloadManager.PUBLIC_DIR_NAME] so a same-named track elsewhere
+     * on the device doesn't win. Returns null when nothing readable exists.
+     */
+    private fun findPublicDownloadContentUri(
+        title: String,
+        artist: String,
+    ): Pair<String, String>? {
+        val base = OfflinePlaybackResolver.publicDownloadBaseName(
+            title = title,
+            artist = artist,
+            sanitize = com.lastwave.app.data.download.TrackDownloadManager::sanitizeDownloadFilename,
+        )
+        val extensions = com.lastwave.app.data.download.TrackDownloadManager.DOWNLOAD_AUDIO_EXTENSIONS
+        val resolver = appContext.contentResolver
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
-            uriString
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         }
+        val includePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        var fallback: Pair<String, String>? = null
+        for (displayName in extensions.map { "$base.$it" }) {
+            val preferred = runCatching {
+                val projection = buildList {
+                    add(MediaStore.Audio.Media._ID)
+                    add(MediaStore.Audio.Media.DISPLAY_NAME)
+                    if (includePath) add(MediaStore.Audio.Media.RELATIVE_PATH)
+                }
+                resolver.query(
+                    collection,
+                    projection.toTypedArray(),
+                    "${MediaStore.Audio.Media.DISPLAY_NAME} = ?",
+                    arrayOf(displayName),
+                    null,
+                )?.use { cursor ->
+                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val pathCol = if (includePath) {
+                        cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+                    } else {
+                        -1
+                    }
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(idCol)
+                        val name = cursor.getString(nameCol) ?: continue
+                        val relativePath = if (pathCol >= 0) {
+                            runCatching { cursor.getString(pathCol) }.getOrNull().orEmpty()
+                        } else {
+                            ""
+                        }
+                        val contentUri = ContentUris.withAppendedId(collection, id).toString()
+                        // Skip rows we can't actually open.
+                        if (!isLocalUriAccessible(contentUri)) continue
+                        val hit = contentUri to name
+                        if (relativePath.contains(
+                                com.lastwave.app.data.download.TrackDownloadManager.PUBLIC_DIR_NAME,
+                                ignoreCase = true,
+                            )
+                        ) {
+                            return@use hit
+                        }
+                        if (fallback == null) fallback = hit
+                    }
+                    null
+                }
+            }.getOrNull()
+            if (preferred != null) return preferred
+        }
+        return fallback
+    }
 
+    private fun isLocalUriAccessible(uriString: String): Boolean = when {
+        uriString.startsWith("content://") -> runCatching {
+            appContext.contentResolver.openInputStream(Uri.parse(uriString))?.use { }
+            true
+        }.getOrDefault(false)
+        else -> runCatching {
+            val file = if (uriString.startsWith("file://")) {
+                File(Uri.parse(uriString).path.orEmpty())
+            } else {
+                File(uriString)
+            }
+            file.exists() && file.length() > 0
+        }.getOrDefault(false)
+    }
+
+    private fun buildLocalDownloadStream(
+        trackKey: String,
+        playbackUri: String,
+        filePath: String,
+        formatBadge: String?,
+        bitrateKbps: Int?,
+        isLossless: Boolean,
+    ): ResolvedStream {
         val mime = when {
-            downloaded.filePath.endsWith(".flac", ignoreCase = true) || downloaded.formatBadge.contains("FLAC") -> "audio/flac"
-            downloaded.filePath.endsWith(".m4a", ignoreCase = true) || downloaded.filePath.endsWith(".mp4", ignoreCase = true) || downloaded.formatBadge.contains("M4A") -> "audio/mp4"
-            downloaded.filePath.endsWith(".opus", ignoreCase = true) || downloaded.formatBadge.contains("OPUS") -> "audio/ogg"
-            downloaded.filePath.endsWith(".mp3", ignoreCase = true) || downloaded.formatBadge.contains("MP3") -> "audio/mpeg"
+            filePath.endsWith(".flac", ignoreCase = true) || formatBadge?.contains("FLAC") == true -> "audio/flac"
+            filePath.endsWith(".m4a", ignoreCase = true) || filePath.endsWith(".mp4", ignoreCase = true) || formatBadge?.contains("M4A") == true -> "audio/mp4"
+            filePath.endsWith(".opus", ignoreCase = true) || formatBadge?.contains("OPUS") == true -> "audio/ogg"
+            filePath.endsWith(".mp3", ignoreCase = true) || formatBadge?.contains("MP3") == true -> "audio/mpeg"
             else -> "audio/flac"
         }
 
         var bitDepth: Int? = null
         var samplingRateKHz: Double? = null
-        var bitrateKbps: Int? = downloaded.bitrateKbps
+        var resolvedBitrateKbps: Int? = bitrateKbps
 
         runCatching {
             val retriever = android.media.MediaMetadataRetriever()
@@ -2135,8 +2268,8 @@ class MusicPlayer @Inject constructor(
                 } else {
                     retriever.setDataSource(playbackUri.removePrefix("file://"))
                 }
-                if (bitrateKbps == null || bitrateKbps == 0) {
-                    bitrateKbps = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()?.let { it / 1000 }
+                if (resolvedBitrateKbps == null || resolvedBitrateKbps == 0) {
+                    resolvedBitrateKbps = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()?.let { it / 1000 }
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     samplingRateKHz = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)?.toDoubleOrNull()?.let { it / 1000.0 }
@@ -2150,10 +2283,10 @@ class MusicPlayer @Inject constructor(
         return ResolvedStream(
             url = playbackUri,
             mimeType = mime,
-            bitrateKbps = bitrateKbps,
-            audioCodec = downloaded.formatBadge,
+            bitrateKbps = resolvedBitrateKbps,
+            audioCodec = formatBadge ?: filePath.substringAfterLast('.', "").uppercase(),
             cacheKey = "local:$trackKey",
-            isLossless = downloaded.isLossless,
+            isLossless = isLossless,
             bitDepth = bitDepth,
             samplingRateKHz = samplingRateKHz,
         )
