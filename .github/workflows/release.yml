@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Git Tag (e.g., 3.4.1)'
+        description: 'Git Tag (e.g., 1.0.0)'
         required: true
-        default: '3.4.1'
+        default: '1.0.0'
       release_name:
-        description: 'Release Title (e.g., LastWave 3.4.1)'
+        description: 'Release Title (e.g., LastWave-Jnr 1.0.0)'
         required: true
-        default: 'LastWave 3.4.1'
+        default: 'LastWave-Jnr 1.0.0'
       release_notes:
         description: 'Changelog / Release Notes'
         required: false
@@ -86,15 +86,15 @@ jobs:
           TAG="${{ inputs.tag_name }}"
           # Universal release (R8 + ProGuard + shrinkResources)
           if [ -f "app/build/outputs/apk/release/app-release-signed.apk" ]; then
-            cp app/build/outputs/apk/release/app-release-signed.apk final_apk/LastWave-v${TAG}-universal.apk
+            cp app/build/outputs/apk/release/app-release-signed.apk final_apk/LastWave-Jnr-v${TAG}-universal.apk
           else
-            cp app/build/outputs/apk/release/app-release.apk final_apk/LastWave-v${TAG}-universal.apk
+            cp app/build/outputs/apk/release/app-release.apk final_apk/LastWave-Jnr-v${TAG}-universal.apk
           fi
           # Universal uncompressed variant (raw debuggable/unminified)
           if [ -f "app/build/outputs/apk/rawRelease/app-rawRelease-signed.apk" ]; then
-            cp app/build/outputs/apk/rawRelease/app-rawRelease-signed.apk final_apk/LastWave-v${TAG}-universal-uncompressed.apk
+            cp app/build/outputs/apk/rawRelease/app-rawRelease-signed.apk final_apk/LastWave-Jnr-v${TAG}-universal-uncompressed.apk
           else
-            cp app/build/outputs/apk/rawRelease/app-rawRelease.apk final_apk/LastWave-v${TAG}-universal-uncompressed.apk
+            cp app/build/outputs/apk/rawRelease/app-rawRelease.apk final_apk/LastWave-Jnr-v${TAG}-universal-uncompressed.apk
           fi
           ls -lh final_apk/
 

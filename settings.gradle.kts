@@ -25,5 +25,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "LastWave"
+rootProject.name = "LastWave-Jnr"
 include(":app")

@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-Security fixes are provided for the latest stable release of LastWave.
+Security fixes are provided for the latest stable release of LastWave-Jnr.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 3.4.x   | Yes                |
-| < 3.4.1 | No                 |
+| 1.0.x   | Yes                |
+| < 1.0.0 | No                 |
 
 ## Reporting a Vulnerability
 

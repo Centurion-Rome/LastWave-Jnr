@@ -2,36 +2,23 @@
 
 <img src="lastwave_logo.png" alt="LastWave Logo" width="120" height="120" style="border-radius: 50%;" />
 
-# LastWave v3.4.1
+# LastWave-Jnr v1.0.0
 
 **High-Resolution Lossless Music Streaming & Player with Real-Time Synced Lyrics & Smart Discovery for Android, built with Material 3 Expressive design.**
+ **Fork Highlight:** Based on LastWave with added Analog VU meter and fixed offline Play functionality (which is still broken in original app).
 
 <p align="center">
-  <a href="https://github.com/duxtami/LastWave-native/stargazers">
-    <img src="https://img.shields.io/github/stars/duxtami/LastWave-native?style=for-the-badge&color=ffd0b0&labelColor=2d2d2d" alt="Stars" />
-  </a>
-  <a href="https://github.com/duxtami/LastWave-native/network/members">
-    <img src="https://img.shields.io/github/forks/duxtami/LastWave-native?style=for-the-badge&color=ffb4a2&labelColor=2d2d2d" alt="Forks" />
-  </a>
   <a href="#">
     <img src="https://img.shields.io/badge/Audio-Hi--Res%20Lossless%20FLAC-00E5FF?style=for-the-badge&logo=flac&logoColor=white&labelColor=012226" alt="Hi-Res Lossless FLAC" />
   </a>
   <a href="#">
-    <img src="https://img.shields.io/badge/Version-3.4.1--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 3.4.1-native" />
+    <img src="https://img.shields.io/badge/Version-1.0.0--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 1.0.0-native" />
   </a>
   <a href="#">
     <img src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white&labelColor=2d2d2d" alt="Platform" />
   </a>
 </p>
 
-<p align="center">
-  <a href="https://t.me/clashprojects">
-    <img src="https://img.shields.io/badge/Telegram-Updates%20%26%20Support-24A1DE?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram Support" />
-  </a>
-  <a href="https://t.me/MaterialYouApp">
-    <img src="https://img.shields.io/badge/Telegram-More%20From%20Us-0088cc?style=for-the-badge&logo=telegram&logoColor=white" alt="More From Us" />
-  </a>
-</p>
 
 </div>
 
@@ -98,7 +85,7 @@ LastWave features a lossless streaming and download engine powered directly by t
 ## <img src="https://api.iconify.design/lucide:rocket.svg?color=%23C6F100" width="20" height="20" align="center" /> Getting Started
 
 1. Download the latest APK from the **[Releases](https://github.com/duxtami/LastWave-native/actions)** tab.
-2. Install the single release package (`LastWave-v3.4.1-release.apk`).
+2. Install the single release package (`LastWave-Jnr-v1.0.0-release.apk`).
 3. Connect your Last.fm account to sync your scrobbles, taste profile, and discovery feed.
 4. Start streaming in bit-perfect lossless quality.
 

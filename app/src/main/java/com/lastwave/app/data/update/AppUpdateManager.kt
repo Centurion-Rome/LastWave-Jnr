@@ -37,7 +37,7 @@ class AppUpdateManager @Inject constructor(
     private val okHttpClient: OkHttpClient,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val prefs = context.getSharedPreferences("lastwave_updates", Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences("lastwave_jnr_updates", Context.MODE_PRIVATE)
 
     private val _updateInfo = MutableStateFlow(
         UpdateInfo(
@@ -51,9 +51,9 @@ class AppUpdateManager @Inject constructor(
     }
 
     fun getCurrentVersion(): String = try {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "3.4.1"
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
     } catch (_: Exception) {
-        "3.4.1"
+        "1.0.0"
     }
 
     fun checkForUpdate(isSilent: Boolean = false) {
