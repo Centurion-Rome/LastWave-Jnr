@@ -1550,11 +1550,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.1.0"
 } catch (error: Exception) {
-    "1.0.0"
+    "1.1.0"
 } catch (error: LinkageError) {
-    "1.0.0"
+    "1.1.0"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a
