@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
@@ -124,6 +125,14 @@ fun FeedPlaylistDetailScreen(
             }
 
             is FeedPlaylistDetailUiState.Success -> {
+                if (current.isLoadingMore) {
+                    Text("Loading remaining tracks…", modifier = Modifier.padding(horizontal = 16.dp))
+                }
+                if (current.loadError != null) {
+                    FilledTonalButton(onClick = { viewModel.load(playlistId, force = true) }) {
+                        Text("Playlist incomplete · Retry")
+                    }
+                }
                 PlaylistContent(
                     playlist = current.playlist,
                     onPlay = viewModel::playFrom,
@@ -169,7 +178,7 @@ private fun PlaylistContent(
                     name = playlist.title,
                     artist = playlist.author.orEmpty(),
                     embeddedUrl = playlist.artworkUrl ?: playlist.tracks.firstOrNull()?.artworkUrl,
-                    fallbackIcon = Icons.Filled.MusicNote,
+                    fallbackIcon = if (playlist.id == "yt_liked") Icons.Filled.Favorite else Icons.Filled.MusicNote,
                     modifier = Modifier
                         .size(196.dp)
                         .clip(RoundedCornerShape(26.dp)),

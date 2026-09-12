@@ -8,6 +8,11 @@ import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.lastwave.app.ui.common.PredictiveBackScreen
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -130,7 +135,6 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
@@ -145,6 +149,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -153,10 +159,17 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -191,6 +204,7 @@ import com.lastwave.app.ui.common.TrackContextMenuSheet
 import com.lastwave.app.ui.common.TrackMenuCapabilities
 import com.lastwave.app.ui.common.TrackMenuTarget
 import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.LiquidGlassSurface
 import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import com.lastwave.app.ui.theme.liquidGlassSource
@@ -198,6 +212,8 @@ import com.lastwave.app.ui.theme.isLiquidGlassBackdropSupported
 import com.lastwave.app.ui.theme.LocalLiquidGlassBackdrop
 import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
 import com.lastwave.app.ui.theme.LiquidGlassPreset
+import com.lastwave.app.ui.theme.BackdropBlur
+import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -264,6 +280,7 @@ class PlayerViewModel @Inject constructor(
     val lyricsState = _lyricsState.asStateFlow()
 
     private var currentTrackLyricsKey: String? = null
+    private var lyricsJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -272,24 +289,22 @@ class PlayerViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            ytMusicLibraryManager.playlists.collect { remote ->
-                if (customPlaylistsLoaded) {
-                    _customPlaylists.value = (playlistRepository.getAll()
-                        .filter { it.mode == "custom" || it.mode == LIKED_SONGS_MODE }
-                        .sortedByDescending { it.mode == LIKED_SONGS_MODE } + remote)
-                        .distinctBy { it.id }
-                }
+            ytMusicLibraryManager.playlists.collect {
+                if (customPlaylistsLoaded) refreshCustomPlaylists()
             }
         }
         viewModelScope.launch {
-            player.chromeState.collect { playerState ->
-                val track = playerState.current
-                val key = track?.let { "${it.artist}|${it.title}" }
+            combine(
+                player.chromeState.map { it.current }.distinctUntilChanged(),
+                settingsPreferences.settings.map { it.wordByWordLyrics }.distinctUntilChanged(),
+            ) { track, wordByWord -> track to wordByWord }.collect { (track, wordByWord) ->
+                val key = track?.let { "${it.artist}|${it.title}|$wordByWord" }
                 if (key != currentTrackLyricsKey) {
                     currentTrackLyricsKey = key
                     if (track != null) {
                         loadLyrics(track, forceRefresh = false)
                     } else {
+                        lyricsJob?.cancel()
                         _lyricsState.value = LyricsUiState.Idle
                     }
                 }
@@ -298,10 +313,17 @@ class PlayerViewModel @Inject constructor(
     }
 
     private suspend fun refreshCustomPlaylists() {
-        _customPlaylists.value = (playlistRepository.getAll()
-            .filter { it.mode == "custom" || it.mode == LIKED_SONGS_MODE }
-            .sortedByDescending { it.mode == LIKED_SONGS_MODE } + ytMusicLibraryManager.playlists.value)
-            .distinctBy { it.id }
+        try {
+            _customPlaylists.value = (playlistRepository.getAll()
+                .filter { it.mode == "custom" || it.mode == LIKED_SONGS_MODE }
+                .sortedByDescending { it.mode == LIKED_SONGS_MODE } + ytMusicLibraryManager.playlists.value)
+                .distinctBy { it.id }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            customPlaylistsLoaded = false
+            android.util.Log.e("PlayerViewModel", "Couldn't refresh playlists", error)
+        }
     }
 
     fun prepareCustomPlaylists() {
@@ -311,29 +333,53 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun loadLyrics(track: PlayableTrack, forceRefresh: Boolean = false) {
-        viewModelScope.launch {
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch {
             _lyricsState.value = LyricsUiState.Loading
             val durationSeconds = if (player.state.value.durationMs > 0) {
                 (player.state.value.durationMs / 1000).toInt()
             } else null
 
-            when (val result = lyricsRepository.getLyrics(track.title, track.artist, track.album, durationSeconds, forceRefresh)) {
-                is LyricsResult.Success -> {
-                    _lyricsState.value = LyricsUiState.Success(
-                        lines = result.lines,
-                        isSynced = result.isSynced,
-                        isWordSynced = result.isWordSynced,
-                        plainLyrics = result.plainLyrics,
-                        isInstrumental = result.isInstrumental,
-                        source = result.source,
-                    )
-                }
-                is LyricsResult.Empty -> {
-                    _lyricsState.value = LyricsUiState.Empty
-                }
-                is LyricsResult.Error -> {
-                    _lyricsState.value = LyricsUiState.Error(result.message)
-                }
+            val result = try {
+                lyricsRepository.getLyrics(
+                    track.title, track.artist, track.album, durationSeconds, forceRefresh,
+                    wordByWord = settingsPreferences.settings.first().wordByWordLyrics,
+                    onPartialResult = { partial ->
+                        withContext(Dispatchers.Main.immediate) {
+                            coroutineContext.ensureActive()
+                            publishLyrics(partial)
+                        }
+                    },
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                LyricsResult.Error(error.message ?: "Couldn't load lyrics")
+            }
+            coroutineContext.ensureActive()
+            if (result is LyricsResult.Success || _lyricsState.value !is LyricsUiState.Success) {
+                publishLyrics(result)
+            }
+        }
+    }
+
+    private fun publishLyrics(result: LyricsResult) {
+        when (result) {
+            is LyricsResult.Success -> {
+                _lyricsState.value = LyricsUiState.Success(
+                    lines = result.lines,
+                    isSynced = result.isSynced,
+                    isWordSynced = result.isWordSynced,
+                    plainLyrics = result.plainLyrics,
+                    isInstrumental = result.isInstrumental,
+                    source = result.source,
+                )
+            }
+            is LyricsResult.Empty -> {
+                _lyricsState.value = LyricsUiState.Empty
+            }
+            is LyricsResult.Error -> {
+                _lyricsState.value = LyricsUiState.Error(result.message)
             }
         }
     }
@@ -479,6 +525,8 @@ fun PlayerHost(
             }
         }
     }
+    val miniPlayerVisible = state.current != null && !expanded
+
     CompositionLocalProvider(
         LocalMusicPlayer provides viewModel.player,
         LocalAddToPlaylist provides requestAddToPlaylist,
@@ -486,7 +534,7 @@ fun PlayerHost(
     ) {
         Box(Modifier.fillMaxSize()) {
             content()
-            if (state.current != null && !expanded) {
+            if (miniPlayerVisible) {
                 MiniPlayer(
                     state = state,
                     progressState = viewModel.progressState,
@@ -497,6 +545,7 @@ fun PlayerHost(
                     onClose = viewModel.player::stopAndClear,
                     bottomPadding = if (hasBottomNavigation) 92.dp else 12.dp,
                     edgeToEdge = !hasBottomNavigation,
+                    backdrop = null,
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
@@ -648,6 +697,7 @@ private fun MiniPlayer(
     onClose: () -> Unit,
     bottomPadding: androidx.compose.ui.unit.Dp,
     edgeToEdge: Boolean,
+    backdrop: Backdrop? = LocalLiquidGlassBackdrop.current,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -655,7 +705,6 @@ private fun MiniPlayer(
     // Liquid Glass dressing for the floating mini player (no-op when the
     // experimental setting is off — see ui/theme/LiquidGlass.kt).
     val liquidGlass = LocalLiquidGlass.current
-    val backdrop = LocalLiquidGlassBackdrop.current
     var dragX by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     var dragY by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     val shownX by animateFloatAsState(dragX, ExpressiveMotion.spatialSpring(), label = "miniPlayerX")
@@ -710,9 +759,9 @@ private fun MiniPlayer(
     ) {
         Surface(
             shape = shape,
-            color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh, backdrop = backdrop),
-            tonalElevation = if (edgeToEdge) 0.dp else 6.dp,
-            shadowElevation = if (edgeToEdge) 0.dp else 12.dp,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (liquidGlass) 0.80f else 1f),
+            tonalElevation = if (edgeToEdge || liquidGlass) 0.dp else 6.dp,
+            shadowElevation = if (edgeToEdge || liquidGlass) 0.dp else 12.dp,
             modifier = Modifier.fillMaxWidth().liquidGlassChrome(shape, liquidGlass, LiquidGlassPreset.MiniPlayer, backdrop),
         ) {
             Column(
@@ -757,15 +806,17 @@ private fun MiniPlayer(
                     Surface(
                         onClick = onToggle,
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        color = if (liquidGlass) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                            else MaterialTheme.colorScheme.primary,
+                        contentColor = if (liquidGlass) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.size(48.dp),
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             if (state.isBuffering) {
                                 ExpressiveInlineLoadingIndicator(
                                     size = 24.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    color = androidx.compose.material3.LocalContentColor.current,
                                     strokeWidth = 2.5.dp,
                                 )
                             } else {
@@ -870,6 +921,7 @@ fun PlayingWaveBars(
             androidx.compose.foundation.Canvas(
                 Modifier.fillMaxSize(),
             ) {
+            if (size.width <= 0f || size.height <= 0f) return@Canvas
             val barCount = 3
             val barWidth = (size.width / 5.2f).coerceAtLeast(1.5f)
             val barGap = barWidth * 0.9f
@@ -882,7 +934,7 @@ fun PlayingWaveBars(
                     1 -> second.value
                     else -> third.value
                 }
-                val barHeight = (size.height * fraction).coerceIn(barWidth, size.height)
+                val barHeight = (size.height * fraction).coerceIn(minOf(barWidth, size.height), size.height)
                 drawRoundRect(
                     color = waveColor,
                     topLeft = androidx.compose.ui.geometry.Offset(
@@ -1336,7 +1388,7 @@ private fun FullPlayer(
     progressState: StateFlow<PlaybackProgressState>,
     player: MusicPlayer,
     lyricsState: LyricsUiState,
-    lyricsUiVersion: LyricsUiVersion = LyricsUiVersion.CLASSIC,
+    lyricsUiVersion: LyricsUiVersion = LyricsUiVersion.MODERN,
     lyricsAnimation: LyricsAnimation = LyricsAnimation.APPLE_FLUID,
     wavySeekbarEnabled: Boolean = true,
     currentTab: FullPlayerTab,
@@ -1349,6 +1401,26 @@ private fun FullPlayer(
     onDoubleTapLike: () -> Unit = {},
 ) {
     val track = state.current ?: return
+    var lyricsFullscreen by remember(currentTab) { mutableStateOf(false) }
+    BackHandler(enabled = lyricsFullscreen) { lyricsFullscreen = false }
+    val view = LocalView.current
+    DisposableEffect(view, lyricsFullscreen) {
+        val fullscreenActive = lyricsFullscreen
+        val activity = generateSequence(view.context) { (it as? android.content.ContextWrapper)?.baseContext }
+            .filterIsInstance<android.app.Activity>().firstOrNull()
+        val controller = activity?.window?.let { WindowCompat.getInsetsController(it, view) }
+        val previousBehavior = controller?.systemBarsBehavior
+        if (fullscreenActive) {
+            controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            if (fullscreenActive) {
+                controller?.show(WindowInsetsCompat.Type.systemBars())
+                previousBehavior?.let { controller?.systemBarsBehavior = it }
+            }
+        }
+    }
     var showTrackMenu by remember(track.videoId, track.title) { mutableStateOf(false) }
     var artworkDragX by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     var dismissDragY by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
@@ -1462,23 +1534,24 @@ private fun FullPlayer(
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val bgWidth = constraints.maxWidth.toFloat()
             val bgHeight = constraints.maxHeight.toFloat()
-            val bgMaxDimension = maxOf(bgWidth, bgHeight)
+            val bgMaxDimension = maxOf(bgWidth, bgHeight, 1f)
 
             Box(Modifier.matchParentSize().liquidGlassSource(playerBackdrop)) {
             // Apple Music: Full-bleed scaled & deeply blurred artwork
-            PlayerArtwork(
-                track = track,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.35f
-                        scaleY = 1.35f
-                        alpha = 0.72f
-                    }
-                    .blur(36.dp),
-                corner = 0.dp,
-                decodeSizePx = 200,
-            )
+            BackdropBlur(radius = 36.dp, modifier = Modifier.fillMaxSize()) {
+                PlayerArtwork(
+                    track = track,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = 1.35f
+                            scaleY = 1.35f
+                            alpha = 0.72f
+                        },
+                    corner = 0.dp,
+                    decodeSizePx = 200,
+                )
+            }
 
             // Apple Music: Vibrant chromatic ambient mesh blobs
             Box(
@@ -1568,7 +1641,7 @@ private fun FullPlayer(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 // ── Header: slimmer, calmer, premium ─────────────────────
-                Box(
+                if (!lyricsFullscreen) Box(
                     Modifier
                         .fillMaxWidth()
                         .adaptiveContentWidth(maxWidth = 640.dp)
@@ -1588,8 +1661,9 @@ private fun FullPlayer(
                             .align(Alignment.CenterStart)
                             .size(44.dp)
                             .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
+                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
                             ),
                     ) {
                         Icon(
@@ -1632,8 +1706,9 @@ private fun FullPlayer(
                             .align(Alignment.CenterEnd)
                             .size(44.dp)
                             .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
+                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
                             ),
                     ) {
                         Icon(
@@ -1645,7 +1720,7 @@ private fun FullPlayer(
                     }
                 }
 
-                Spacer(Modifier.height(6.dp))
+                if (!lyricsFullscreen) Spacer(Modifier.height(6.dp))
 
                 AnimatedContent(
                     targetState = currentTab,
@@ -1675,7 +1750,8 @@ private fun FullPlayer(
                                     progressState = progressState,
                                     wavySeekbarEnabled = wavySeekbarEnabled,
                                     onRetry = onRetryLyrics,
-                                    onOpenPlayer = { onTabChange(FullPlayerTab.NOW_PLAYING) },
+                                    onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
+                                    isFullscreen = lyricsFullscreen,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .adaptiveContentWidth(maxWidth = 720.dp),
@@ -1689,7 +1765,8 @@ private fun FullPlayer(
                                     lyricsAnimation = lyricsAnimation,
                                     wavySeekbarEnabled = wavySeekbarEnabled,
                                     onRetry = onRetryLyrics,
-                                    onOpenPlayer = { onTabChange(FullPlayerTab.NOW_PLAYING) },
+                                    onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
+                                    isFullscreen = lyricsFullscreen,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .adaptiveContentWidth(maxWidth = 720.dp),
@@ -2039,15 +2116,16 @@ private fun FullPlayer(
                                                 ),
                                                 label = "likeScale",
                                             )
-                                            Surface(
+                                            LiquidGlassSurface(
+                                                glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
                                                 onClick = onToggleLiked,
                                                 interactionSource = likeInteraction,
                                                 shape = CircleShape,
-                                                color = if (isLiked) {
+                                                color = liquidGlassContainerColor(if (isLiked) {
                                                     MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
                                                 } else {
                                                     MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)
-                                                },
+                                                }),
                                                 contentColor = if (isLiked) {
                                                     MaterialTheme.colorScheme.onPrimaryContainer
                                                 } else {
@@ -2077,11 +2155,12 @@ private fun FullPlayer(
                                                 animationSpec = ExpressiveMotion.spatialSpring(),
                                                 label = "lyricsScale",
                                             )
-                                            Surface(
+                                            LiquidGlassSurface(
+                                                glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
                                                 onClick = { onTabChange(FullPlayerTab.LYRICS) },
                                                 interactionSource = lyricsInteraction,
                                                 shape = CircleShape,
-                                                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
+                                                color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
                                                 contentColor = MaterialTheme.colorScheme.primary,
                                                 tonalElevation = 0.dp,
                                                 shadowElevation = 0.dp,
@@ -2120,7 +2199,7 @@ private fun FullPlayer(
                         }
                     }
                 }
-                state.error?.let { message ->
+                state.error?.takeUnless { lyricsFullscreen }?.let { message ->
                     Surface(
                         onClick = player::retry,
                         shape = RoundedCornerShape(20.dp),
@@ -2434,7 +2513,8 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
         horizontalArrangement = Arrangement.spacedBy(if (isTranslucent) 18.dp else 16.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Surface(
+        LiquidGlassSurface(
+            glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
             onClick = player::previous,
             interactionSource = prevInteraction,
             shape = CircleShape,
@@ -2444,7 +2524,6 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
             shadowElevation = 0.dp,
             modifier = Modifier
                 .size(if (isTranslucent) 54.dp else 58.dp)
-                .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls)
                 .graphicsLayer {
                     scaleX = prevScale
                     scaleY = prevScale
@@ -2454,12 +2533,15 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
                 Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(if (isTranslucent) 28.dp else 31.dp))
             }
         }
-        Surface(
+        LiquidGlassSurface(
+            glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls),
             onClick = player::togglePlayPause,
             interactionSource = playInteraction,
             shape = CircleShape,
-            color = if (isTranslucent) Color.White else MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
-            contentColor = if (isTranslucent) Color.Black else MaterialTheme.colorScheme.onPrimary,
+            color = liquidGlassContainerColor(if (isTranslucent) Color.White else MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)),
+            contentColor = if (LocalLiquidGlass.current) {
+                if (isTranslucent) Color.White else MaterialTheme.colorScheme.primary
+            } else if (isTranslucent) Color.Black else MaterialTheme.colorScheme.onPrimary,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp,
             modifier = Modifier
@@ -2473,7 +2555,7 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
                 if (state.isBuffering) {
                     ExpressiveInlineLoadingIndicator(
                         size = if (isTranslucent) 28.dp else 30.dp,
-                        color = if (isTranslucent) Color.Black else MaterialTheme.colorScheme.onPrimary,
+                        color = androidx.compose.material3.LocalContentColor.current,
                         strokeWidth = 3.dp,
                     )
                 } else {
@@ -2481,7 +2563,8 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
                 }
             }
         }
-        Surface(
+        LiquidGlassSurface(
+            glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
             onClick = player::next,
             interactionSource = nextInteraction,
             shape = CircleShape,
@@ -2491,7 +2574,6 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
             shadowElevation = 0.dp,
             modifier = Modifier
                 .size(if (isTranslucent) 54.dp else 58.dp)
-                .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls)
                 .graphicsLayer {
                     scaleX = nextScale
                     scaleY = nextScale
@@ -2499,6 +2581,60 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(Icons.Filled.SkipNext, "Next", Modifier.size(if (isTranslucent) 28.dp else 31.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerModeButton(
+    active: Boolean,
+    description: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    background: Color,
+    foreground: Color,
+    iconSize: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        if (pressed) 0.92f else 1f, ExpressiveMotion.spatialSpring(), label = "modePress",
+    )
+    val container by animateColorAsState(
+        if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.86f)
+        else liquidGlassContainerColor(background), label = "modeContainer",
+    )
+    val content by animateColorAsState(
+        if (active) MaterialTheme.colorScheme.onPrimaryContainer else foreground, label = "modeContent",
+    )
+    LiquidGlassSurface(
+        glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
+        onClick = onClick,
+        interactionSource = interaction,
+        shape = CircleShape,
+        color = container,
+        contentColor = content,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .semantics {
+                selected = active
+                stateDescription = description
+            },
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(icon, description, Modifier.size(iconSize))
+            if (active) {
+                Box(
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = 5.dp)
+                        .size(4.dp).background(content, CircleShape),
+                )
             }
         }
     }
@@ -2532,20 +2668,16 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
         horizontalArrangement = Arrangement.spacedBy(if (isTranslucent) 10.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Surface(
+        PlayerModeButton(
+            active = state.shuffleEnabled,
+            description = if (state.shuffleEnabled) "Shuffle on" else "Shuffle off",
+            icon = Icons.Filled.Shuffle,
             onClick = player::toggleShuffle,
-            shape = CircleShape,
-            color = liquidGlassContainerColor(if (state.shuffleEnabled) qualityButtonBackground else edgeButtonBackground),
-            contentColor = if (state.shuffleEnabled) qualityButtonContent else edgeButtonContent,
-            tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
-            modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp)
-                .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Shuffle, "Shuffle", modifier = Modifier.size(if (isTranslucent) 19.dp else 20.dp))
-            }
-        }
+            background = edgeButtonBackground,
+            foreground = edgeButtonContent,
+            iconSize = if (isTranslucent) 19.dp else 20.dp,
+            modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp),
+        )
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = liquidGlassContainerColor(qualityButtonBackground),
@@ -2576,24 +2708,20 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
                 )
             }
         }
-        Surface(
+        PlayerModeButton(
+            active = state.repeatMode != Player.REPEAT_MODE_OFF,
+            description = when (state.repeatMode) {
+                Player.REPEAT_MODE_ONE -> "Repeat one"
+                Player.REPEAT_MODE_ALL -> "Repeat all"
+                else -> "Repeat off"
+            },
+            icon = if (state.repeatMode == Player.REPEAT_MODE_ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
             onClick = player::cycleRepeatMode,
-            shape = CircleShape,
-            color = liquidGlassContainerColor(if (state.repeatMode != Player.REPEAT_MODE_OFF) qualityButtonBackground else edgeButtonBackground),
-            contentColor = if (state.repeatMode != Player.REPEAT_MODE_OFF) qualityButtonContent else edgeButtonContent,
-            tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
-            modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp)
-                .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    if (state.repeatMode == Player.REPEAT_MODE_ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
-                    "Repeat mode",
-                    modifier = Modifier.size(if (isTranslucent) 19.dp else 20.dp),
-                )
-            }
-        }
+            background = edgeButtonBackground,
+            foreground = edgeButtonContent,
+            iconSize = if (isTranslucent) 19.dp else 20.dp,
+            modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp),
+        )
     }
 }
 
@@ -2634,7 +2762,8 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
         ) {
             itemsIndexed(state.queue, key = { index, item -> "$index:${item.videoId ?: item.artist + item.title}" }) { index, item ->
                 val isCurrent = index == state.currentIndex
-                Surface(
+                LiquidGlassSurface(
+                    glassModifier = Modifier.liquidGlassChrome(RoundedCornerShape(20.dp), LocalLiquidGlass.current),
                     onClick = { player.seekToQueueItem(index) },
                     shape = RoundedCornerShape(20.dp),
                     color = liquidGlassContainerColor(
@@ -2643,8 +2772,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                     ),
                     contentColor = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer
                     else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.animateItem()
-                        .liquidGlassChrome(RoundedCornerShape(20.dp), LocalLiquidGlass.current),
+                    modifier = Modifier.animateItem(),
                 ) {
                     Row(
                         Modifier.fillMaxWidth().padding(9.dp),

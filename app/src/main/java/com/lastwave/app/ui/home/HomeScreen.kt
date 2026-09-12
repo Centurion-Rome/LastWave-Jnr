@@ -99,6 +99,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.liquidGlassChrome
+import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -168,7 +171,7 @@ fun HomeScreen(
         topBar = {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 ExpressiveHeader(
-                    title = "LastWave",
+                    title = "Stats",
                     modifier = Modifier.adaptiveContentWidth(maxWidth = 860.dp),
                     actions = {
                         HeaderActionIcon(Icons.Filled.Explore, "Discover", onOpenDiscover)
@@ -579,9 +582,9 @@ private fun rememberAnimatedCount(target: Long): Long {
 @Composable
 private fun StatPill(label: String, value: Long, modifier: Modifier = Modifier) {
     Surface(
-        modifier = modifier,
+        modifier = modifier.liquidGlassChrome(StatPillShape, LocalLiquidGlass.current),
         shape = StatPillShape,
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        color = liquidGlassContainerColor(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)),
     ) {
         Column(Modifier.padding(vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
@@ -826,7 +829,7 @@ private fun TrackRow(
             ) {
                 ArtworkImage(
                     name = track.name,
-                    artist = track.artist,
+                    artist = com.lastwave.app.util.ArtistHelper.primaryArtist(track.artist),
                     embeddedUrl = track.artworkUrl,
                     fallbackIcon = if (isNowPlaying) Icons.Filled.GraphicEq else Icons.Filled.MusicNote,
                     modifier = Modifier.fillMaxSize(),
@@ -848,7 +851,7 @@ private fun TrackRow(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    track.artist,
+                    com.lastwave.app.util.ArtistHelper.primaryArtist(track.artist),
                     style = MaterialTheme.typography.bodyMedium,
                     color = secondaryTextColor,
                     maxLines = 1,

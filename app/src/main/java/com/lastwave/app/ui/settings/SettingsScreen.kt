@@ -102,6 +102,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,7 +139,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
 import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
+import com.lastwave.app.ui.theme.LiquidGlassPreset
 import com.lastwave.app.ui.theme.liquidGlassContainerColor
+import com.lastwave.app.ui.theme.LiquidGlassSurface
 import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.R
@@ -666,6 +670,7 @@ fun SettingsScreen(
                         7 -> "Hi-Res (24-bit / 96 kHz)"
                         6 -> "CD Lossless (16-bit / 44.1 kHz FLAC)"
                         5 -> "Standard (320 kbps MP3)"
+                        -1 -> "YouTube Music (AAC / Opus)"
                         else -> "Max (Up to 24-bit / 192 kHz)"
                     }
                     val downloadQualitySubtitle = when (misc.downloadQuality) {
@@ -684,8 +689,8 @@ fun SettingsScreen(
                                 icon = Icons.Filled.HighQuality,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                title = "Lossless Streaming",
-                                subtitle = "$qualitySubtitle \u2022 YouTube Music fallback",
+                                title = "Streaming Quality",
+                                subtitle = if (misc.losslessQuality == -1) "YouTube Music • Native stream" else "$qualitySubtitle • YouTube Music fallback",
                                 onClick = { showQualityDialog = true },
                                 position = position,
                             )
@@ -1181,6 +1186,8 @@ fun SettingsScreen(
     if (showLyricsAnimationSheet) {
         LyricsAnimationSheet(
             version = misc.lyricsUiVersion,
+            wordByWord = misc.wordByWordLyrics,
+            onWordByWordChange = viewModel::setWordByWordLyrics,
             onSelectVersion = viewModel::setLyricsUiVersion,
             current = misc.lyricsAnimation,
             onSelect = {
@@ -1218,6 +1225,7 @@ fun SettingsScreen(
             Triple(7, "Hi-Res Audio", "24-bit / 96 kHz • Lossless Studio FLAC" to "24-BIT / 96k"),
             Triple(6, "CD Lossless", "16-bit / 44.1 kHz • Lossless CD FLAC" to "16-BIT / 44.1k"),
             Triple(5, "Standard Quality", "320 kbps • MP3 (Data Saver)" to "320 kbps"),
+            Triple(-1, "YouTube Music", "128-256 kbps • YouTube Music AAC / Opus stream" to "YOUTUBE"),
         )
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -1280,7 +1288,7 @@ fun SettingsScreen(
                 }
 
                 Text(
-                    "If a track is unavailable in the chosen quality, the highest available quality will be streamed automatically.",
+                    "Lossless streams provide bit-exact studio quality (FLAC/MP3). If your chosen quality is unavailable, LastWave automatically streams the higher quality tier above it (or falls back to YouTube Music if unavailable in lossless).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -2776,6 +2784,9 @@ private fun EqNativeSlider(
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val normalized = ((gainDb + EQ_MAX_DB) / (EQ_MAX_DB * 2f)).coerceIn(0f, 1f)
     var isDragging by remember { mutableStateOf(false) }
+    val currentGain by rememberUpdatedState(gainDb)
+    val currentOnGainChange by rememberUpdatedState(onGainChange)
+    val currentOnChangeFinished by rememberUpdatedState(onChangeFinished)
 
     Column(
         modifier = modifier,
@@ -2825,25 +2836,25 @@ private fun EqNativeSlider(
                         onDragStart = { isDragging = true },
                         onDragEnd = {
                             isDragging = false
-                            onChangeFinished()
+                            currentOnChangeFinished()
                         },
                         onDragCancel = {
                             isDragging = false
-                            onChangeFinished()
+                            currentOnChangeFinished()
                         },
                     ) { change, dragAmount ->
                         change.consume()
                         val deltaFraction = -dragAmount / size.height.toFloat()
-                        val currentFraction = ((gainDb + EQ_MAX_DB) / (EQ_MAX_DB * 2f))
+                        val currentFraction = ((currentGain + EQ_MAX_DB) / (EQ_MAX_DB * 2f))
                         val newFraction = (currentFraction + deltaFraction).coerceIn(0f, 1f)
                         val newGain = (newFraction * EQ_MAX_DB * 2f - EQ_MAX_DB).let {
                             if (it in -0.3f..0.3f) 0f else (Math.round(it * 2f) / 2f)
                         }
-                        if (newGain != gainDb) {
-                            if (newGain == 0f && gainDb != 0f) {
+                        if (newGain != currentGain) {
+                            if (newGain == 0f && currentGain != 0f) {
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                             }
-                            onGainChange(newGain)
+                            currentOnGainChange(newGain)
                         }
                     }
                 },
@@ -3239,6 +3250,8 @@ private fun SyncPlaylistsSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LyricsAnimationSheet(
+    wordByWord: Boolean,
+    onWordByWordChange: (Boolean) -> Unit,
     version: LyricsUiVersion,
     onSelectVersion: (LyricsUiVersion) -> Unit,
     current: LyricsAnimation,
@@ -3252,8 +3265,16 @@ private fun LyricsAnimationSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = if (liquidGlass) MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.94f)
-        else MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.liquidGlassChrome(
+            RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            liquidGlass,
+            LiquidGlassPreset.ModalSheet,
+            LocalLiquidGlassOverlayBackdrop.current,
+        ),
+        containerColor = liquidGlassContainerColor(
+            MaterialTheme.colorScheme.surfaceContainer,
+            backdrop = LocalLiquidGlassOverlayBackdrop.current,
+        ),
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
     ) {
         Column(
@@ -3298,6 +3319,16 @@ private fun LyricsAnimationSheet(
                 }
             }
 
+            SettingsToggleCard(
+                icon = Icons.Filled.Lyrics,
+                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                title = "Word-by-word lyrics",
+                subtitle = "Turn off to use LRCLIB line-by-line lyrics",
+                checked = wordByWord,
+                onCheckedChange = onWordByWordChange,
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -3309,19 +3340,20 @@ private fun LyricsAnimationSheet(
                 versions.forEach { (ver, label) ->
                     val isVerSelected = ver == version
                     val chipShape = RoundedCornerShape(14.dp)
-                    Surface(
+                    LiquidGlassSurface(
+                        glassModifier = Modifier.liquidGlassChrome(chipShape, liquidGlass),
                         onClick = {
                             haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                             onSelectVersion(ver)
                         },
                         shape = chipShape,
-                        color = if (isVerSelected) {
+                        color = liquidGlassContainerColor(if (isVerSelected) {
                             if (liquidGlass) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
                             else MaterialTheme.colorScheme.primaryContainer
                         } else {
                             if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.60f)
                             else MaterialTheme.colorScheme.surfaceContainerHigh
-                        },
+                        }),
                         modifier = Modifier
                             .weight(1f)
                             .clip(chipShape),
@@ -3425,9 +3457,9 @@ private fun LyricsAnimationSheet(
             } else {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.70f)
-                    else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
-                    modifier = Modifier.fillMaxWidth(),
+                    color = liquidGlassContainerColor(if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.70f)
+                    else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                    modifier = Modifier.fillMaxWidth().liquidGlassChrome(RoundedCornerShape(18.dp), liquidGlass),
                 ) {
                     Column(
                         modifier = Modifier.padding(20.dp),

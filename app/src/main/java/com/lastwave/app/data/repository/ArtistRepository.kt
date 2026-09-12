@@ -33,38 +33,44 @@ class ArtistRepository @Inject constructor(
     suspend fun getArtistDetails(
         artistName: String,
         browseId: String? = null,
+        onLoaded: (ArtistPageData) -> Unit = {},
     ): ArtistPageData = withContext(Dispatchers.IO) {
-        val cleanName = artistName.trim()
-        var targetBrowseId = browseId?.takeIf(String::isNotBlank)
-        var searchArtwork: String? = null
+        val cleanName = com.lastwave.app.util.ArtistHelper.primaryArtist(artistName).trim()
+        if (cleanName.isBlank()) throw java.io.IOException("Artist name is empty.")
 
-        // 1. Resolve browseId if missing
-        if (targetBrowseId == null && cleanName.isNotBlank()) {
-            val searchResults = runCatching { innerTube.searchArtists(cleanName, limit = 5) }.getOrNull().orEmpty()
-            val match = searchResults.firstOrNull { it.name.equals(cleanName, ignoreCase = true) }
-            targetBrowseId = match?.browseId
-            searchArtwork = match?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage)
-        }
+        // The whole resolve + load runs under one timeout so a stalled
+        // lookup can never leave the screen on its spinner forever — a
+        // timeout surfaces as an error with Retry instead.
+        val loaded = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
+            var targetBrowseId = browseId?.takeIf { it.startsWith("UC") }
+            var searchArtwork: String? = null
 
-        coroutineScope {
+            // 1. Resolve browseId if missing
+            if (targetBrowseId == null) {
+                val searchResults = runCatching { innerTube.searchArtists(cleanName, limit = 5) }.getOrNull().orEmpty()
+                val match = searchResults.firstOrNull { it.name.equals(cleanName, ignoreCase = true) }
+                    ?: searchResults.firstOrNull()
+                targetBrowseId = match?.browseId
+                searchArtwork = match?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage)
+            }
+            val resolvedId = targetBrowseId
+
+            coroutineScope {
             // Load InnerTube artist data in parallel with Last.fm metadata
             val innerTubeDeferred = async {
-                targetBrowseId?.let { id ->
-                    runCatching { innerTube.fetchArtistPage(id, artistNameFallback = cleanName) }.getOrNull()
-                }
+                runCatching { resolvedId?.let { innerTube.fetchArtistPage(it, artistNameFallback = cleanName, onLoaded = onLoaded) } }.getOrNull()
             }
 
             val lastFmDeferred = async {
-                if (cleanName.isNotBlank()) {
-                    runCatching { fetchLastFmArtistInfo(cleanName) }.getOrNull()
-                } else null
+                runCatching { fetchLastFmArtistInfo(cleanName) }.getOrNull()
             }
 
             val ytData = innerTubeDeferred.await()
-            val lfmData = lastFmDeferred.await()
+            ytData?.takeIf { it.topSongs.isNotEmpty() }?.let(onLoaded)
 
             // Merge InnerTube rich playable songs & discography with Last.fm bio & tags
-            val finalName = ytData?.name?.takeIf(String::isNotBlank) ?: cleanName.ifBlank { "Artist" }
+            val finalName = ytData?.name?.takeIf(String::isNotBlank)?.let { com.lastwave.app.util.ArtistHelper.primaryArtist(it).trim() }
+                ?: cleanName.ifBlank { "Artist" }
             if (!ArtworkNormalizer.isRealImage(ytData?.artworkUrl) && searchArtwork == null) {
                 searchArtwork = runCatching {
                     innerTube.searchArtists(cleanName, limit = 5)
@@ -73,16 +79,15 @@ class ArtistRepository @Inject constructor(
                 }.getOrNull()
             }
             val artwork = ytData?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage)
-                ?: searchArtwork ?: lfmData?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage)
+                ?: searchArtwork
             val banner = ytData?.bannerUrl?.takeIf(ArtworkNormalizer::isRealImage) ?: artwork
-            val bio = ytData?.bio?.takeIf(String::isNotBlank) ?: lfmData?.bio
-            val tags = lfmData?.tags.orEmpty()
-            val listeners = ytData?.subscribers ?: lfmData?.listeners
+            val bio = ytData?.bio?.takeIf(String::isNotBlank)
+            val listeners = ytData?.subscribers
 
             var topSongs = ytData?.topSongs.orEmpty()
 
-            // Fallback & Enrichment: If InnerTube returned <= 5 preview songs or was empty, supplement with search
-            if (topSongs.size <= 5 && finalName.isNotBlank()) {
+            // Search only when the artist page has no playable songs.
+            if (topSongs.isEmpty() && finalName.isNotBlank()) {
                 val songs = runCatching { innerTube.searchSongs(finalName, limit = 30) }.getOrDefault(emptyList())
                 val existingIds = topSongs.mapNotNull { it.videoId }.toSet()
                 val existingTitles = topSongs.map { it.title.lowercase().trim() }.toSet()
@@ -105,22 +110,43 @@ class ArtistRepository @Inject constructor(
                 topSongs = (topSongs + additionalTracks).distinctBy { it.videoId ?: it.title }
             }
 
-            ArtistPageData(
+            val pageData = ArtistPageData(
                 name = finalName,
-                browseId = targetBrowseId.orEmpty(),
+                browseId = resolvedId.orEmpty(),
                 artworkUrl = artwork,
                 fallbackArtworkUrl = searchArtwork,
                 bannerUrl = banner,
                 monthlyListeners = ytData?.monthlyListeners ?: listeners,
                 subscribers = ytData?.subscribers ?: listeners,
                 bio = bio,
-                tags = tags,
                 topSongs = topSongs,
                 albums = ytData?.albums.orEmpty(),
                 singles = ytData?.singles.orEmpty(),
-                similarArtists = if (ytData?.similarArtists?.isNotEmpty() == true) ytData.similarArtists else lfmData?.similarArtists.orEmpty(),
+                similarArtists = ytData?.similarArtists.orEmpty(),
             )
+            if (topSongs.isNotEmpty()) onLoaded(pageData)
+            val lfmData = lastFmDeferred.await()
+            pageData.copy(
+                artworkUrl = pageData.artworkUrl ?: lfmData?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage),
+                bannerUrl = pageData.bannerUrl ?: lfmData?.artworkUrl?.takeIf(ArtworkNormalizer::isRealImage),
+                bio = pageData.bio ?: lfmData?.bio,
+                tags = lfmData?.tags.orEmpty(),
+                monthlyListeners = pageData.monthlyListeners ?: lfmData?.listeners,
+                subscribers = pageData.subscribers ?: lfmData?.listeners,
+                similarArtists = pageData.similarArtists.ifEmpty { lfmData?.similarArtists.orEmpty() },
+            )
+            }
+        } ?: throw java.io.IOException("Couldn't load \"$cleanName\". Check your connection and try again.")
+
+        // Never hand the UI a completely hollow page (no songs, no albums,
+        // no artwork): it looks exactly like a stuck loader with dead play
+        // buttons. Surface an error with Retry instead.
+        if (loaded.topSongs.isEmpty() && loaded.albums.isEmpty() && loaded.singles.isEmpty() &&
+            !ArtworkNormalizer.isRealImage(loaded.artworkUrl)
+        ) {
+            throw java.io.IOException("No playable tracks found for \"$cleanName\" right now.")
         }
+        loaded
     }
 
     private data class LastFmArtistMeta(
@@ -179,11 +205,13 @@ class ArtistRepository @Inject constructor(
             it["#text"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true
         }?.get("#text")?.jsonPrimitive?.contentOrNull
 
-        val similar = artistObj["similar"]?.jsonObject?.get("artist")?.jsonArray?.mapNotNull {
-            val name = it.jsonObject["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val img = it.jsonObject["image"]?.jsonArray?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.contentOrNull
-            ArtistSummaryItem(name = name, artworkUrl = img)
-        }.orEmpty()
+        val similar = artistObj["similar"]?.jsonObject?.get("artist")?.jsonArray?.flatMap { elem ->
+            val name = elem.jsonObject["name"]?.jsonPrimitive?.contentOrNull ?: return@flatMap emptyList()
+            val img = elem.jsonObject["image"]?.jsonArray?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.contentOrNull
+            com.lastwave.app.util.ArtistHelper.splitArtists(name).map { singleName ->
+                ArtistSummaryItem(name = singleName, artworkUrl = img)
+            }
+        }.orEmpty().distinctBy { it.name.lowercase().trim() }
 
         return LastFmArtistMeta(
             bio = bio,
@@ -192,5 +220,38 @@ class ArtistRepository @Inject constructor(
             tags = tags,
             similarArtists = similar,
         )
+    }
+
+    suspend fun getArtistRadio(
+        artistName: String,
+        seedTrack: PlayableTrack? = null,
+    ): List<PlayableTrack> = withContext(Dispatchers.IO) {
+        val cleanArtist = artistName.trim()
+        val seedVideoId = seedTrack?.videoId?.takeIf(String::isNotBlank)
+            ?: runCatching {
+                innerTube.searchSongs("$cleanArtist songs", limit = 5, prefetchStreams = false)
+                    .firstOrNull { it.artist.contains(cleanArtist, ignoreCase = true) || cleanArtist.contains(it.artist, ignoreCase = true) }
+                    ?.videoId
+            }.getOrNull()
+
+        val related = if (!seedVideoId.isNullOrBlank()) {
+            runCatching {
+                innerTube.fetchRelatedSongs(seedVideoId, limit = 30, prefetchStreams = false)
+            }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+
+        val relatedPlayable = related.map { track ->
+            PlayableTrack(
+                title = track.title,
+                artist = track.artist,
+                album = track.album,
+                artworkUrl = track.artworkUrl,
+                videoId = track.videoId.takeIf(String::isNotBlank),
+            )
+        }
+
+        (listOfNotNull(seedTrack) + relatedPlayable).distinctBy { it.videoId ?: it.title }
     }
 }

@@ -62,13 +62,18 @@ class ArtistViewModel @Inject constructor(
         loadJob = viewModelScope.launch {
             _uiState.value = ArtistUiState.Loading
             try {
-                val data = repository.getArtistDetails(artistName, browseId)
+                val data = repository.getArtistDetails(artistName, browseId) { initialData ->
+                    coroutineContext.ensureActive()
+                    _uiState.value = ArtistUiState.Success(initialData)
+                }
                 coroutineContext.ensureActive()
                 _uiState.value = ArtistUiState.Success(data)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _uiState.value = ArtistUiState.Error(e.message ?: "Failed to load artist details")
+                if (_uiState.value !is ArtistUiState.Success) {
+                    _uiState.value = ArtistUiState.Error(e.message ?: "Failed to load artist details")
+                }
             }
         }
     }
@@ -92,11 +97,30 @@ class ArtistViewModel @Inject constructor(
 
     fun startArtistMix() {
         val state = _uiState.value as? ArtistUiState.Success ?: return
-        val firstTrack = state.data.topSongs.firstOrNull()
-        if (firstTrack != null) {
-            mixLauncher.startMix(firstTrack.title, state.data.name)
-        } else {
-            mixLauncher.startMix(state.data.name, state.data.name)
+        val artistName = state.data.name
+        val topSongs = state.data.topSongs
+        val firstTrack = topSongs.firstOrNull()
+
+        viewModelScope.launch {
+            val radioTracks = try {
+                repository.getArtistRadio(artistName, firstTrack)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            val finalQueue = if (radioTracks.isNotEmpty()) {
+                radioTracks
+            } else if (topSongs.isNotEmpty()) {
+                topSongs.shuffled()
+            } else {
+                emptyList()
+            }
+
+            if (finalQueue.isNotEmpty()) {
+                musicPlayer.playQueue(finalQueue, startIndex = 0, sourceLabel = "$artistName Radio")
+            }
         }
     }
 }

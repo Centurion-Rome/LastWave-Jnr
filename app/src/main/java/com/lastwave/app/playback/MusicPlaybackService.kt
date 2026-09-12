@@ -299,6 +299,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             Bundle().apply {
                 putInt(CONTENT_STYLE_BROWSABLE_HINT, CONTENT_STYLE_LIST)
                 putInt(CONTENT_STYLE_PLAYABLE_HINT, CONTENT_STYLE_LIST)
+                putBoolean("android.media.browse.SEARCH_SUPPORTED", true)
             },
         )
     }
@@ -339,15 +340,17 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     private fun isAllowedMediaClient(clientPackageName: String, clientUid: Int): Boolean = runCatching {
         // System_server sometimes proxies browse connections (notably some
         // Android Auto ROMs); always allow it.
-        if (clientUid == android.os.Process.SYSTEM_UID) return@runCatching true
-        // Otherwise just verify the UID actually owns the claimed package.
-        // Deliberately NOT restricted to system/car hosts: KWGT
-        // (org.kustom.widget), Wear OS, Tasker, Bluetooth companions, etc.
-        // are ordinary user apps and must be able to connect, otherwise they
-        // can never list or control LastWave.
-        packageManager.getPackagesForUid(clientUid)
-            ?.contains(clientPackageName) == true
-    }.getOrDefault(false)
+        if (clientUid == android.os.Process.SYSTEM_UID || clientUid == android.os.Process.myUid()) return@runCatching true
+        // Android Auto projection & automotive packages
+        if (clientPackageName == "com.google.android.projection.gearhead" ||
+            clientPackageName == "com.google.android.carprojection" ||
+            clientPackageName == "com.google.android.apps.auto.repl" ||
+            clientPackageName == "com.google.android.googlequicksearchbox"
+        ) return@runCatching true
+        val packages = packageManager.getPackagesForUid(clientUid)
+        if (packages.isNullOrEmpty()) return@runCatching true
+        packages.contains(clientPackageName)
+    }.getOrDefault(true)
 
     private fun playCarMediaId(mediaId: String) {
         scope.launch {
@@ -536,6 +539,27 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (musicPlayer.state.value.isPlaying) {
+            // Something is actively playing — leave it running. The
+            // foreground notification is what keeps the service (and the
+            // process) alive; swiping the app from Recents shouldn't kill
+            // playback out from under the user.
+            super.onTaskRemoved(rootIntent)
+            return
+        }
+        // Nothing is playing when the task is removed. Stop the service to
+        // free resources, but do NOT clear the persisted session
+        // (clearSession = false): the old unconditional stopAndClear() wiped
+        // clearPersistedPlaybackSession() here too, so the paused/idle track
+        // and queue vanished and could never be restored on the next
+        // launch. Every other stopAndClear() call site (explicit stop
+        // action, notification "stop", media session onStop) is untouched
+        // and still clears the session as before.
+        musicPlayer.stopAndClear(clearSession = false)
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         runCatching { if (playbackWakeLock?.isHeld == true) playbackWakeLock?.release() }
         runCatching { if (playbackWifiLock?.isHeld == true) playbackWifiLock?.release() }
@@ -546,6 +570,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             else @Suppress("DEPRECATION") stopForeground(true)
             isPlaybackForeground = false
         }
+        getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
         val releasedToken = platformSessionToken
         runCatching { mediaSession?.isActive = false }
         runCatching { mediaSession?.release() }

@@ -32,80 +32,117 @@ class AlbumRepository @Inject constructor(
         albumTitle: String,
         artistName: String = "",
         browseId: String? = null,
+        onLoaded: (AlbumPageData) -> Unit = {},
     ): AlbumPageData = withContext(Dispatchers.IO) {
         val cleanTitle = albumTitle.trim()
         val cleanArtist = artistName.trim()
-        var targetBrowseId = browseId?.takeIf(String::isNotBlank)
+        if (cleanTitle.isBlank()) throw java.io.IOException("Album title is empty.")
 
-        // 1. Resolve browseId if missing
-        if (targetBrowseId == null && cleanTitle.isNotBlank()) {
-            val query = if (cleanArtist.isNotBlank()) "$cleanTitle $cleanArtist" else cleanTitle
-            val searchResults = runCatching { innerTube.searchAlbums(query, limit = 5) }.getOrNull().orEmpty()
-            val match = searchResults.firstOrNull { it.name.equals(cleanTitle, ignoreCase = true) }
-                ?: searchResults.firstOrNull()
-            targetBrowseId = match?.browseId
-        }
+        // The whole resolve + load runs under one timeout so a stalled
+        // lookup can never leave the screen on its spinner forever — a
+        // timeout surfaces as an error with Retry instead.
+        val loaded = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
+            var targetBrowseId = browseId?.takeIf {
+                it.startsWith("MPRE") || it.startsWith("VL") || it.startsWith("OLAK") || it.startsWith("PL")
+            }
 
-        coroutineScope {
-            // Load InnerTube album data in parallel with Last.fm metadata
-            val innerTubeDeferred = async {
-                targetBrowseId?.let { id ->
+            // 1. Resolve browseId if missing
+            if (targetBrowseId == null) {
+                val query = if (cleanArtist.isNotBlank()) "$cleanTitle $cleanArtist" else cleanTitle
+                val searchResults = runCatching { innerTube.searchAlbums(query, limit = 5) }.getOrNull().orEmpty()
+                val match = searchResults.firstOrNull { it.name.equals(cleanTitle, ignoreCase = true) }
+                    ?: searchResults.firstOrNull()
+                targetBrowseId = match?.browseId
+            }
+            val resolvedId = targetBrowseId
+
+            coroutineScope {
+                // Load InnerTube album data in parallel with Last.fm metadata
+                val innerTubeDeferred = async {
                     runCatching {
-                        innerTube.fetchAlbumPage(id, albumTitleFallback = cleanTitle, artistFallback = cleanArtist)
+                        resolvedId?.let { innerTube.fetchAlbumPage(it, albumTitleFallback = cleanTitle, artistFallback = cleanArtist) }
                     }.getOrNull()
                 }
-            }
 
-            val lastFmDeferred = async {
-                if (cleanTitle.isNotBlank() && cleanArtist.isNotBlank()) {
-                    runCatching { fetchLastFmAlbumInfo(cleanTitle, cleanArtist) }.getOrNull()
-                } else null
-            }
-
-            val ytData = innerTubeDeferred.await()
-            val lfmData = lastFmDeferred.await()
-
-            val finalTitle = ytData?.title?.takeIf(String::isNotBlank) ?: cleanTitle.ifBlank { "Album" }
-            val finalArtist = ytData?.artist?.takeIf(String::isNotBlank) ?: cleanArtist.ifBlank { "Various Artists" }
-            val artwork = ytData?.artworkUrl ?: lfmData?.artworkUrl
-            val description = ytData?.description?.takeIf(String::isNotBlank) ?: lfmData?.description
-            val genres = lfmData?.tags.orEmpty()
-            val releaseYear = ytData?.releaseYear ?: lfmData?.releaseYear
-
-            var tracks = ytData?.tracks.orEmpty()
-
-            // Fallback: If InnerTube returned no tracks, search tracks by album and artist
-            if (tracks.isEmpty() && finalTitle.isNotBlank()) {
-                val songs = runCatching {
-                    innerTube.searchSongs("$finalTitle $finalArtist", limit = 20)
-                }.getOrDefault(emptyList())
-
-                tracks = songs.map { track ->
-                    PlayableTrack(
-                        title = track.title,
-                        artist = track.artist.takeUnless { it == "Unknown artist" } ?: finalArtist,
-                        album = finalTitle,
-                        artworkUrl = track.artworkUrl ?: artwork,
-                        videoId = track.videoId,
-                    )
+                val lastFmDeferred = async {
+                    if (cleanArtist.isNotBlank()) {
+                        runCatching { fetchLastFmAlbumInfo(cleanTitle, cleanArtist) }.getOrNull()
+                    } else null
                 }
-            }
 
-            AlbumPageData(
-                title = finalTitle,
-                artist = finalArtist,
-                artistBrowseId = ytData?.artistBrowseId,
-                browseId = targetBrowseId.orEmpty(),
-                artworkUrl = artwork,
-                releaseYear = releaseYear,
-                trackCountText = if (tracks == ytData?.tracks) ytData?.trackCountText else null,
-                durationText = ytData?.durationText,
-                description = description,
-                genres = genres,
-                tracks = tracks,
-                otherAlbums = ytData?.otherAlbums.orEmpty(),
-            )
-        }
+                val ytData = innerTubeDeferred.await()
+                ytData?.takeIf { it.tracks.isNotEmpty() }?.let(onLoaded)
+
+                val finalTitle = ytData?.title?.takeIf(String::isNotBlank) ?: cleanTitle.ifBlank { "Album" }
+                val finalArtist = ytData?.artist?.takeIf(String::isNotBlank) ?: cleanArtist.ifBlank { "Various Artists" }
+                val artwork = ytData?.artworkUrl
+                val description = ytData?.description?.takeIf(String::isNotBlank)
+                val releaseYear = ytData?.releaseYear
+
+                var tracks = ytData?.tracks.orEmpty()
+
+                // Fallback: only when the album page itself yielded no tracks,
+                // and only with songs strictly matching this album/artist.
+                // Mapping raw search hits 1:1 used to render a single random
+                // song (or unrelated songs) as the whole "tracklist".
+                if (tracks.isEmpty() && finalTitle.isNotBlank()) {
+                    val songs = runCatching {
+                        innerTube.searchSongs("$finalTitle $finalArtist", limit = 20)
+                    }.getOrDefault(emptyList())
+
+                    tracks = songs.filter { track ->
+                        if (track.videoId.isBlank()) return@filter false
+                        val artistOk = track.artist.equals(finalArtist, ignoreCase = true) ||
+                            com.lastwave.app.util.ArtistHelper.splitArtists(track.artist)
+                                .any { it.equals(finalArtist, ignoreCase = true) } ||
+                            finalArtist.contains(track.artist, ignoreCase = true) ||
+                            track.artist.equals("Unknown artist", ignoreCase = true)
+                        val albumOk = track.album.equals(finalTitle, ignoreCase = true) ||
+                            (track.album.isNullOrBlank() && track.title.equals(finalTitle, ignoreCase = true))
+                        artistOk && albumOk
+                    }.map { track ->
+                        PlayableTrack(
+                            title = track.title,
+                            artist = track.artist.takeUnless { it == "Unknown artist" } ?: finalArtist,
+                            album = track.album?.takeIf(String::isNotBlank) ?: finalTitle,
+                            artworkUrl = track.artworkUrl ?: artwork,
+                            videoId = track.videoId,
+                        )
+                    }
+                }
+
+                // The page never actually loaded and the fallback found
+                // nothing either: report an error with Retry rather than a
+                // hollow page whose play buttons are all dead.
+                if (ytData == null && tracks.isEmpty()) {
+                    throw java.io.IOException("Couldn't load \"$finalTitle\". Check your connection and try again.")
+                }
+
+                val pageData = AlbumPageData(
+                    title = finalTitle,
+                    artist = finalArtist,
+                    artistBrowseId = ytData?.artistBrowseId,
+                    browseId = resolvedId.orEmpty(),
+                    artworkUrl = artwork,
+                    releaseYear = releaseYear,
+                    trackCountText = if (tracks == ytData?.tracks) ytData?.trackCountText else null,
+                    durationText = ytData?.durationText,
+                    description = description,
+                    tracks = tracks,
+                    otherAlbums = ytData?.otherAlbums.orEmpty(),
+                )
+                if (tracks.isNotEmpty()) onLoaded(pageData)
+                val lfmData = lastFmDeferred.await()
+                pageData.copy(
+                    artworkUrl = pageData.artworkUrl ?: lfmData?.artworkUrl,
+                    description = pageData.description ?: lfmData?.description,
+                    releaseYear = pageData.releaseYear ?: lfmData?.releaseYear,
+                    genres = lfmData?.tags.orEmpty(),
+                )
+            }
+        } ?: throw java.io.IOException("Couldn't load \"$cleanTitle\". Check your connection and try again.")
+
+        loaded
     }
 
     private data class LastFmAlbumMeta(

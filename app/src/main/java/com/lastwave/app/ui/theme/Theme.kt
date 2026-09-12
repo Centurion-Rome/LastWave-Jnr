@@ -67,7 +67,7 @@ fun LastWaveTheme(
                     val backgroundBackdrop = rememberCanvasBackdrop { drawRect(backgroundColor) }
                     CompositionLocalProvider(
                         LocalLiquidGlassBackdrop provides backgroundBackdrop,
-                        LocalLiquidGlassOverlayBackdrop provides null,
+                        LocalLiquidGlassOverlayBackdrop provides backgroundBackdrop,
                     ) {
                         content()
                     }

@@ -60,7 +60,6 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lastwave.app.data.generate.GeneratedTrack
-import com.lastwave.app.playback.PlayableTrack
 import com.lastwave.app.playback.toPlayableTrack
 import com.lastwave.app.ui.common.ArtworkImage
 import com.lastwave.app.ui.common.ExpressiveHeader
@@ -131,7 +130,7 @@ fun DiscoverScreen(onBack: () -> Unit = {}, viewModel: DiscoverViewModel = hiltV
         }
     }
     LaunchedEffect(shouldLoadMore, state.tracks.size) {
-        if (shouldLoadMore && !state.isLoading && !state.isLoadingMore && state.tracks.isNotEmpty()) viewModel.loadMore()
+        if (shouldLoadMore && !state.isLoading && !state.isLoadingMore && !state.endReached && state.tracks.isNotEmpty()) viewModel.loadMore()
     }
 
     Box(
@@ -296,13 +295,6 @@ private fun DiscoverCard(
         trailing = { com.lastwave.app.ui.common.OverflowMenuButton(onClick = onMenu) },
     )
 }
-
-private fun GeneratedTrack.toPlayableTrack() = PlayableTrack(
-    title = name,
-    artist = artist,
-    album = album,
-    artworkUrl = artworkUrl,
-)
 
 @Composable
 private fun SkeletonCard(

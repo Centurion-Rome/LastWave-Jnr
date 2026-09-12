@@ -49,7 +49,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,9 +80,12 @@ import com.lastwave.app.ui.playlist.PlaylistScreen
 import com.lastwave.app.ui.settings.DownloadsScreen
 import com.lastwave.app.ui.theme.LiquidGlassPreset
 import com.lastwave.app.ui.theme.LocalLiquidGlass
-import com.lastwave.app.ui.theme.LocalLiquidGlassBackdrop
+import com.kyant.backdrop.backdrops.LayerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.lastwave.app.ui.theme.isLiquidGlassBackdropSupported
 import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.theme.liquidGlassContainerColor
+import com.lastwave.app.ui.theme.liquidGlassSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -152,6 +154,7 @@ fun MainShell(
     onOpenFeedPlaylist: (String) -> Unit,
     onOpenPlaylist: (Long) -> Unit = {},
     onOpenGenerator: () -> Unit = {},
+    onOpenNewReleases: () -> Unit = {},
     mainShellViewModel: MainShellViewModel = hiltViewModel(),
 ) {
     val tabs = MainTab.entries
@@ -169,6 +172,7 @@ fun MainShell(
     val context = LocalContext.current
     val updateInfo by mainShellViewModel.updateInfo.collectAsStateWithLifecycle()
     val showUpdateBanner = updateInfo.isUpdateAvailable && !updateInfo.isDismissed
+    val navigationBackdrop = if (isLiquidGlassBackdropSupported()) rememberLayerBackdrop() else null
 
     // If offline, open the downloads tab directly
     var hasAutoNavigatedOffline by rememberSaveable { mutableStateOf(isInitiallyOffline) }
@@ -189,7 +193,7 @@ fun MainShell(
         HorizontalPager(
             state = pagerState,
             beyondViewportPageCount = 0,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().liquidGlassSource(navigationBackdrop),
         ) { page ->
             val isCurrent = page == pagerState.currentPage
             PredictiveBackScreen(
@@ -206,6 +210,7 @@ fun MainShell(
                         onOpenGenerator = onOpenGenerator,
                         onOpenFriends = onOpenFriends,
                         onOpenFriendProfile = onOpenFriendProfile,
+                        onOpenNewReleases = onOpenNewReleases,
                     )
                     MainTab.STATS -> HomeScreen(
                         onOpenSettings = onOpenSettings,
@@ -302,6 +307,7 @@ fun MainShell(
         }
 
         FloatingNavBar(
+            backdrop = navigationBackdrop,
             tabs = tabs,
             selectedIndex = pagerState.currentPage,
             onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
@@ -343,7 +349,7 @@ private fun UpdatePromptCard(
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
                 Text(
-                    text = "LastWave v$version is ready to install",
+                    text = "LastWave-Jnr v$version is ready to install",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                 )
@@ -380,6 +386,7 @@ private fun UpdatePromptCard(
 
 @Composable
 private fun FloatingNavBar(
+    backdrop: LayerBackdrop?,
     tabs: List<MainTab>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
@@ -387,7 +394,6 @@ private fun FloatingNavBar(
     modifier: Modifier = Modifier,
 ) {
     val liquidGlass = LocalLiquidGlass.current
-    val backdrop = LocalLiquidGlassBackdrop.current
     Box(
         modifier = modifier
             .windowInsetsPadding(
@@ -403,9 +409,9 @@ private fun FloatingNavBar(
         ) {
             Surface(
                 shape = DockShape,
-                color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh, backdrop = backdrop),
-                tonalElevation = 6.dp,
-                shadowElevation = 12.dp,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (liquidGlass) 0.80f else 1f),
+                tonalElevation = if (liquidGlass) 0.dp else 6.dp,
+                shadowElevation = if (liquidGlass) 0.dp else 12.dp,
                 modifier = Modifier.liquidGlassChrome(DockShape, liquidGlass, LiquidGlassPreset.BottomNavigation, backdrop),
             ) {
                 Row(
@@ -440,8 +446,8 @@ private fun FloatingNavBar(
                     Surface(
                         shape = CircleShape,
                         color = liquidGlassContainerColor(MaterialTheme.colorScheme.primaryContainer, backdrop = backdrop),
-                        shadowElevation = 10.dp,
-                        tonalElevation = 4.dp,
+                        shadowElevation = if (liquidGlass) 0.dp else 10.dp,
+                        tonalElevation = if (liquidGlass) 0.dp else 4.dp,
                         modifier = Modifier
                             .size(56.dp)
                             .liquidGlassChrome(CircleShape, liquidGlass, LiquidGlassPreset.FloatingControls, backdrop)
@@ -470,7 +476,9 @@ private fun FloatingNavItem(
     onClick: () -> Unit,
 ) {
     val backgroundColor by animateColorAsState(
-        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(
+            alpha = if (LocalLiquidGlass.current) 0.28f else 1f,
+        ) else Color.Transparent,
         animationSpec = navSpring(),
         label = "navItemBackground",
     )

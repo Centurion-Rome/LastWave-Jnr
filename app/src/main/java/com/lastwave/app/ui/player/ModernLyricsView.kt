@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MusicOff
@@ -52,6 +53,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
+import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.LiquidGlassSurface
+import com.lastwave.app.ui.theme.liquidGlassChrome
+import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -89,7 +94,8 @@ fun ModernLyricsPanel(
     lyricsState: LyricsUiState,
     progressState: StateFlow<PlaybackProgressState>? = null,
     wavySeekbarEnabled: Boolean = true,
-    onOpenPlayer: (() -> Unit)? = null,
+    onToggleFullscreen: (() -> Unit)? = null,
+    isFullscreen: Boolean = false,
     onRetry: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -172,6 +178,12 @@ fun ModernLyricsPanel(
                             onRetry = onRetry,
                         )
                     } else if (targetState.isSynced && targetState.lines.isNotEmpty()) {
+                        // Word-sync can fail (all providers down / LRCLIB line
+                        // fallback): huge karaoke type then overflows off-screen.
+                        // Fall back to a smaller line style, and sit the list a
+                        // little lower so the first line clears the header.
+                        val isWordSynced = targetState.isWordSynced ||
+                            remember(targetState.lines) { targetState.lines.any { it.hasSyllables } }
                         val isOverallRtl = remember(targetState.lines) {
                             val meaningful = targetState.lines.filter { it.text.isNotBlank() && it.text != "♪" }
                             if (meaningful.isEmpty()) false
@@ -189,7 +201,41 @@ fun ModernLyricsPanel(
                         val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialLineIndex)
 
                         val layoutDirection = if (isOverallRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                        // Short provider badge: makes it visible why words
+                        // animate (word-sync) or just scroll (line-sync).
+                        val syncLabel = remember(targetState.source, isWordSynced) {
+                            val provider = targetState.source
+                                ?.substringBefore(" (")
+                                ?.takeIf { it.isNotBlank() } ?: "Lyrics"
+                            "${if (isWordSynced) "WORD SYNC" else "LINE SYNC"} • $provider"
+                        }
                         CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(top = 12.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    ) {
+                                        Text(
+                                            text = syncLabel,
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                letterSpacing = 0.6.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                            ),
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                        )
+                                    }
+                                }
                             KaraokeLyricsView(
                                 listState = listState,
                                 lyrics = syncedLyrics,
@@ -200,20 +246,23 @@ fun ModernLyricsPanel(
                                     player.seekTo(line.start.toLong())
                                 },
                                 onLinePressed = {},
-                                modifier = Modifier.fillMaxSize(),
-                                offset = 64.dp,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                offset = 84.dp,
                                 normalLineTextStyle = LocalTextStyle.current.copy(
-                                    fontSize = 34.sp,
+                                    fontSize = if (isWordSynced) 34.sp else 27.sp,
                                     fontWeight = FontWeight.Black,
                                     textMotion = TextMotion.Animated,
                                 ),
                                 accompanimentLineTextStyle = LocalTextStyle.current.copy(
-                                    fontSize = 22.sp,
+                                    fontSize = if (isWordSynced) 22.sp else 19.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     textMotion = TextMotion.Animated,
                                 ),
                                 textColor = Color.White,
                             )
+                            }
                         }
                     } else if (!targetState.plainLyrics.isNullOrBlank()) {
                         ModernPlainLyricsView(
@@ -240,7 +289,8 @@ fun ModernLyricsPanel(
             totalDurationMs = if (progress.durationMs > 0) progress.durationMs else state.durationMs,
             player = player,
             wavySeekbarEnabled = wavySeekbarEnabled,
-            onOpenPlayer = onOpenPlayer,
+            onToggleFullscreen = onToggleFullscreen,
+            isFullscreen = isFullscreen,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
@@ -399,7 +449,8 @@ private fun ModernLyricsControls(
     totalDurationMs: Long,
     player: MusicPlayer,
     wavySeekbarEnabled: Boolean = true,
-    onOpenPlayer: (() -> Unit)? = null,
+    onToggleFullscreen: (() -> Unit)? = null,
+    isFullscreen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -408,7 +459,7 @@ private fun ModernLyricsControls(
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (onOpenPlayer != null) {
+        if (onToggleFullscreen != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -423,11 +474,12 @@ private fun ModernLyricsControls(
                     animationSpec = ExpressiveMotion.spatialSpring(),
                     label = "playerTabScale",
                 )
-                Surface(
-                    onClick = onOpenPlayer,
+                LiquidGlassSurface(
+                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current),
+                    onClick = onToggleFullscreen,
                     interactionSource = playerInteraction,
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
+                    color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
                     contentColor = MaterialTheme.colorScheme.primary,
                     tonalElevation = 0.dp,
                     shadowElevation = 0.dp,
@@ -440,14 +492,16 @@ private fun ModernLyricsControls(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            Icons.Filled.Fullscreen,
-                            contentDescription = "Now playing",
+                            if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                            contentDescription = if (isFullscreen) "Exit fullscreen lyrics" else "Fullscreen lyrics",
                             modifier = Modifier.size(24.dp),
                         )
                     }
                 }
             }
         }
+
+        if (isFullscreen) return@Column
 
         var dragging by remember { mutableStateOf(false) }
         var dragValue by remember { mutableFloatStateOf(0f) }
@@ -497,8 +551,9 @@ private fun ModernLyricsControls(
                     onClick = player::previous,
                     modifier = Modifier
                         .size(42.dp)
+                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                        .background(liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f))),
                 ) {
                     Icon(
                         Icons.Filled.SkipPrevious,
@@ -508,10 +563,11 @@ private fun ModernLyricsControls(
                     )
                 }
 
-                Surface(
+                LiquidGlassSurface(
+                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current),
                     onClick = player::togglePlayPause,
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                    color = liquidGlassContainerColor(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)),
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     tonalElevation = 0.dp,
                     shadowElevation = 0.dp,
@@ -534,8 +590,9 @@ private fun ModernLyricsControls(
                     onClick = player::next,
                     modifier = Modifier
                         .size(42.dp)
+                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                        .background(liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f))),
                 ) {
                     Icon(
                         Icons.Filled.SkipNext,

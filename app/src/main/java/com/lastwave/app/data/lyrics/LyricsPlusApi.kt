@@ -1,5 +1,8 @@
 package com.lastwave.app.data.lyrics
 
+import com.lastwave.app.data.artwork.awaitSuccessfulBodyOrNull
+import kotlinx.coroutines.CancellationException
+
 import com.lastwave.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -81,17 +84,32 @@ class LyricsPlusApi @Inject constructor(
             return@withContext directResult
         }
 
+        // Duration-gated server miss (music-video vs audio lengths): retry
+        // without duration before falling back to other providers.
+        if (durationSeconds != null && durationSeconds > 0) {
+            val noDurationResult = queryEndpoints(title, artist, album, null)
+            if (noDurationResult != null && !noDurationResult.lyrics.isNullOrEmpty()) {
+                return@withContext noDurationResult
+            }
+        }
+
         if (cleanedTitle != title || cleanedArtist != artist) {
             val cleanedResult = queryEndpoints(cleanedTitle, cleanedArtist, album, durationSeconds)
             if (cleanedResult != null && !cleanedResult.lyrics.isNullOrEmpty()) {
                 return@withContext cleanedResult
+            }
+            if (durationSeconds != null && durationSeconds > 0) {
+                val cleanedNoDuration = queryEndpoints(cleanedTitle, cleanedArtist, album, null)
+                if (cleanedNoDuration != null && !cleanedNoDuration.lyrics.isNullOrEmpty()) {
+                    return@withContext cleanedNoDuration
+                }
             }
         }
 
         null
     }
 
-    private fun queryEndpoints(
+    private suspend fun queryEndpoints(
         title: String,
         artist: String,
         album: String?,
@@ -123,15 +141,11 @@ class LyricsPlusApi @Inject constructor(
             }
 
             try {
-                okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val body = response.body?.string() ?: return@use
-                        val parsed = json.decodeFromString<LyricsPlusResponse>(body)
-                        if (!parsed.lyrics.isNullOrEmpty()) {
-                            return parsed
-                        }
-                    }
-                }
+                val body = okHttpClient.newCall(requestBuilder.build()).awaitSuccessfulBodyOrNull() ?: continue
+                val parsed = json.decodeFromString<LyricsPlusResponse>(body)
+                if (!parsed.lyrics.isNullOrEmpty()) return parsed
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (e: IOException) {
                 // Continue to fallback endpoint
             } catch (e: Exception) {
