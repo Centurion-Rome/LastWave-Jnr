@@ -42,6 +42,18 @@
 -keep class * extends androidx.glance.appwidget.GlanceAppWidgetReceiver { *; }
 -keep class com.lastwave.app.widget.** { *; }
 
+# Glance's widget session lifecycle (SessionWorker) runs through WorkManager
+# for every session op (update, action callback, composition). Without these
+# keeps R8 strips the zero-arg constructors WorkManager needs to reflectively
+# instantiate its InputMerger/Worker classes in release builds, which fails
+# silently inside Glance's session machinery before provideGlance ever runs
+# (symptoms: "OverwritingInputMerger ... has no zero argument constructor",
+# "Didn't find WorkSpec").
+-keep class androidx.work.** { *; }
+-keep class * extends androidx.work.ListenableWorker { *; }
+-keep class * extends androidx.work.Worker { public <init>(...); }
+-keep class * implements androidx.work.InputMerger { public <init>(...); }
+
 # NewPipe's YouTube extractor loads service implementations and its
 # JavaScript deobfuscation engine dynamically.
 -keep class org.schabi.newpipe.extractor.** { *; }

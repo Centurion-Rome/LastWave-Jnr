@@ -34,6 +34,7 @@ import androidx.glance.layout.padding
 import androidx.glance.layout.size
 import androidx.glance.layout.width
 import androidx.glance.material3.ColorProviders
+import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
@@ -95,6 +96,12 @@ class NowPlayingWidget : GlanceAppWidget() {
     interface WidgetEntryPoint {
         fun themeRepository(): ThemeRepository
     }
+
+    // Glance's default PreferencesGlanceStateDefinition does a DataStore
+    // file read/write on every session op. This widget already persists
+    // its own snapshot (NowPlayingWidgetSnapshot), so swap in a no-op
+    // in-memory store to remove that file I/O from the render path.
+    override val stateDefinition: GlanceStateDefinition<*> = InMemoryWidgetState
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val entryPoint = runCatching {
