@@ -5,7 +5,9 @@
 # LastWave-Jnr v1.1.0
 
 **High-Resolution Lossless Music Streaming & Player with Real-Time Synced Lyrics & Smart Discovery for Android, built with Material 3 Expressive design.**
- **Fork Highlight:** Based on LastWave with added Analog VU meter and fixed offline Play functionality (which is still broken in original app).
+ **Fork Highlight:** Based on [LastWave-Native](https://github.com/Clash-Projects/LastWave-Native) with added Analog VU meter and fixed offline Play functionality (which is still broken in original app).
+
+> **Upstream:** This project is derived from [Clash-Projects/LastWave-Native](https://github.com/Clash-Projects/LastWave-Native). All credit for the core app goes to the original authors.
 
 <p align="center">
   <a href="#">
