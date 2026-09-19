@@ -9,6 +9,8 @@ import com.lastwave.app.data.repository.HomeSortMode
 import com.lastwave.app.data.repository.HomeStats
 import com.lastwave.app.data.model.RecentTrack
 import com.lastwave.app.data.repository.HomeTrack
+import com.lastwave.app.data.repository.HomeAlbum
+import com.lastwave.app.data.repository.HomeArtistItem
 import com.lastwave.app.data.repository.ThemeRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.coroutineScope
@@ -47,6 +49,11 @@ data class HomeUiState(
     val topTracksOverall: List<HomeTrack> = emptyList(),
     val topTracks7Days: List<HomeTrack> = emptyList(),
     val topTracks30Days: List<HomeTrack> = emptyList(),
+    /** Top artists / albums podium + genre chips. Last.fm origin when
+     *  connected, Room + taste-profile origin in local mode. Empty = hide. */
+    val topArtists: List<com.lastwave.app.data.repository.HomeArtistItem> = emptyList(),
+    val topAlbums: List<com.lastwave.app.data.repository.HomeAlbum> = emptyList(),
+    val topTags: List<String> = emptyList(),
     val page: Int = 1,
     val totalPages: Int = 1,
     val error: String? = null,
@@ -54,6 +61,12 @@ data class HomeUiState(
     val isLoadingFriends: Boolean = false,
     val showFriendsSheet: Boolean = false,
     val pinnedFriends: Set<String> = emptySet(),
+    /**
+     * True when Last.fm is NOT connected and Stats runs in Local Stats Mode
+     * (aggregated from the local Room database). The UI shows a subtle
+     * "Connect Last.fm in Settings to sync global scrobbles" banner.
+     */
+    val isLocalStatsMode: Boolean = false,
 ) {
     val isViewingFriend: Boolean get() = viewingUsername.isNotBlank() && viewingUsername != username
 
@@ -68,6 +81,10 @@ sealed interface HomeRow {
     data class DateHeader(val label: String) : HomeRow
     @Immutable
     data class Track(val track: HomeTrack, val badge: String?) : HomeRow
+    @Immutable
+    data class Album(val album: HomeAlbum, val badge: String?) : HomeRow
+    @Immutable
+    data class Artist(val artist: HomeArtistItem, val badge: String?) : HomeRow
 }
 
 /** Derives the display list for the current tab — instant, smooth, and accurate. */
@@ -128,6 +145,20 @@ fun HomeUiState.visibleRows(): List<HomeRow> {
             }
             rows
         }
+        HomeSortMode.TOP_ALBUMS -> {
+            val rows = mutableListOf<HomeRow>()
+            topAlbums.forEach { a ->
+                rows += HomeRow.Album(a, badge = null)
+            }
+            rows
+        }
+        HomeSortMode.TOP_ARTISTS -> {
+            val rows = mutableListOf<HomeRow>()
+            topArtists.forEach { a ->
+                rows += HomeRow.Artist(a, badge = null)
+            }
+            rows
+        }
     }
 }
 
@@ -185,12 +216,19 @@ private data class RowsKey(
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val homeRepository: HomeRepository,
+    private val localStatsRepository: com.lastwave.app.data.repository.LocalStatsRepository,
+    private val tasteProfileProvider: com.lastwave.app.data.generate.TasteProfileProvider,
     private val sessionPreferences: SessionPreferences,
     private val themeRepository: ThemeRepository,
     private val viewingProfileState: com.lastwave.app.data.repository.ViewingProfileState,
     private val settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
     private val scrobbleRepository: com.lastwave.app.data.repository.ScrobbleRepository,
 ) : ViewModel() {
+
+    companion object {
+        private fun isLastFmUsername(username: String): Boolean =
+            username.isNotBlank() && !username.equals("Guest User", ignoreCase = true)
+    }
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -214,6 +252,36 @@ class HomeViewModel @Inject constructor(
 
     init {
         loadInitial()
+        // Last.fm connect/disconnect in Settings must switch Stats between
+        // global and local modes without an app restart.
+        viewModelScope.launch {
+            // Skip the very first emission: loadInitial() already covers the
+            // startup session. Every later change is a real connect/disconnect.
+            var isFirstEmission = true
+            sessionPreferences.session
+                .map { it.username }
+                .distinctUntilChanged()
+                .collect { latestUsername ->
+                    if (isFirstEmission) {
+                        isFirstEmission = false
+                        return@collect
+                    }
+                    val current = _uiState.value
+                    // While viewing a friend, own-session changes must not
+                    // hijack the friend's screen.
+                    if (current.isViewingFriend) return@collect
+                    if (latestUsername == current.username) return@collect
+                    // Own profile changed: keep `username` (signed-in identity)
+                    // and `viewingUsername` (displayed account) in lockstep so
+                    // isViewingFriend stays false for own data.
+                    _uiState.update { it.copy(username = latestUsername) }
+                    if (!isLastFmUsername(latestUsername)) {
+                        launch(Dispatchers.IO) { loadLocalStats(latestUsername) }
+                    } else {
+                        loadForUsername(latestUsername)
+                    }
+                }
+        }
         viewModelScope.launch {
             settingsPreferences.settings.collect { misc ->
                 _uiState.update { it.copy(pinnedFriends = misc.pinnedFriends) }
@@ -310,6 +378,10 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isLoading = true, error = null) }
             val username = sessionPreferences.session.first().username
+            if (!isLastFmUsername(username)) {
+                loadLocalStats(username)
+                return@launch
+            }
             val result = homeRepository.fetchInitialData()
             result.fold(
                 onSuccess = { data ->
@@ -327,14 +399,127 @@ class HomeViewModel @Inject constructor(
                             topTracksOverall = data.topTracks,
                             page = data.recent.page,
                             totalPages = data.recent.totalPages,
+                            isLocalStatsMode = false,
                         )
                     }
                     preloadPeriodTracks()
+                    preloadTopMeta(username)
                 },
                 onFailure = { e ->
-                    _uiState.update { it.copy(isLoading = false, username = username, viewingUsername = username, error = e.message ?: "Couldn't load your data") }
+                    // Last.fm unreachable (offline / rate-limited): degrade to
+                    // local stats rather than leaving Stats empty.
+                    runCatching { localStatsRepository.load() }.getOrNull()?.let { local ->
+                        cachedTopTracks = local.topTracks
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                username = username,
+                                viewingUsername = username,
+                                stats = local.stats,
+                                nowPlaying = null,
+                                allTracks = local.topTracks,
+                                topTracksOverall = local.topTracks,
+                                topArtists = local.topArtists.take(10),
+                                topAlbums = local.topAlbums.take(10),
+                                page = 1,
+                                totalPages = 1,
+                                sortMode = HomeSortMode.MOST_PLAYED,
+                                isLocalStatsMode = true,
+                                error = null,
+                            )
+                        }
+                        preloadLocalTags()
+                    } ?: _uiState.update {
+                        it.copy(isLoading = false, username = username, viewingUsername = username, error = e.message ?: "Couldn't load your data")
+                    }
                 },
             )
+        }
+    }
+
+    /**
+     * Local Stats Mode: aggregates plays, top artists/tracks, and listening
+     * time directly from the local Room database (saved playlists + liked +
+     * downloads). Used when Last.fm is NOT connected (guest/disconnected).
+     */
+    private suspend fun loadLocalStats(username: String) {
+        val local = runCatching { localStatsRepository.load() }.getOrNull()
+        if (local == null) {
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    username = username,
+                    viewingUsername = username,
+                    stats = null,
+                    allTracks = emptyList(),
+                    topTracksOverall = emptyList(),
+                    isLocalStatsMode = true,
+                    error = "Couldn't load local stats",
+                )
+            }
+            return
+        }
+        cachedTopTracks = local.topTracks
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                username = username,
+                viewingUsername = username,
+                stats = local.stats,
+                nowPlaying = null,
+                // Local tracks carry no timestamps, so default to Most Played
+                // (Recent would filter everything out).
+                sortMode = HomeSortMode.MOST_PLAYED,
+                allTracks = local.topTracks,
+                topTracksOverall = local.topTracks,
+                topTracks7Days = emptyList(),
+                topTracks30Days = emptyList(),
+                topArtists = local.topArtists.take(10),
+                topAlbums = local.topAlbums.take(10),
+                page = 1,
+                totalPages = 1,
+                isLocalStatsMode = true,
+                error = null,
+            )
+        }
+        preloadLocalTags()
+    }
+
+    /** Genre chips from the taste profile (Last.fm tags or chart defaults for
+     *  guests). Never fails the Stats screen — empty means hide the row. */
+    private fun preloadLocalTags() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tags = runCatching { tasteProfileProvider.get().topTags.toList() }
+                .getOrDefault(emptyList()).take(8)
+            _uiState.update { it.copy(topTags = tags) }
+        }
+    }
+
+    /** Podium meta for a connected Last.fm account: top artists + albums for
+     *  [username] (own or friend) plus own taste tags. Each fetch fails
+     *  independently so one flaky call never clears the others. */
+    private fun preloadTopMeta(username: String, period: String = "overall") {
+        viewModelScope.launch(Dispatchers.IO) {
+            homeRepository.fetchTopArtistsForPeriod(period, 10, username = username)
+                .onSuccess { artists -> _uiState.update { it.copy(topArtists = artists.take(10)) } }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            homeRepository.fetchTopAlbums(period = period, limit = 10, username = username)
+                .onSuccess { albums -> _uiState.update { it.copy(topAlbums = albums.take(10)) } }
+        }
+        // Tags are personal (own taste), not the viewed friend's.
+        if (!isLastFmUsername(_uiState.value.username)) {
+            preloadLocalTags()
+            return
+        }
+        if (_uiState.value.isViewingFriend) {
+            _uiState.update { it.copy(topTags = emptyList()) }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val tags = runCatching { tasteProfileProvider.get().topTags.toList() }
+                .getOrDefault(emptyList()).take(8)
+            _uiState.update { it.copy(topTags = tags) }
         }
     }
 
@@ -353,6 +538,33 @@ class HomeViewModel @Inject constructor(
     }
 
     fun refresh() {
+        // Local mode pull-to-refresh reloads Room, not Last.fm.
+        if (_uiState.value.isLocalStatsMode && !_uiState.value.isViewingFriend) {
+            viewModelScope.launch(Dispatchers.IO) {
+                _uiState.update { it.copy(isRefreshing = true) }
+                try {
+                    val local = localStatsRepository.load()
+                    cachedTopTracks = local.topTracks
+                    val tags = runCatching { tasteProfileProvider.get().topTags.toList() }
+                        .getOrDefault(emptyList()).take(8)
+                    _uiState.update {
+                        it.copy(
+                            isRefreshing = false,
+                            stats = local.stats,
+                            allTracks = local.topTracks,
+                            topTracksOverall = local.topTracks,
+                            topArtists = local.topArtists.take(10),
+                            topAlbums = local.topAlbums.take(10),
+                            topTags = tags,
+                            error = null,
+                        )
+                    }
+                } catch (e: Exception) {
+                    _uiState.update { it.copy(isRefreshing = false, error = e.message) }
+                }
+            }
+            return
+        }
         val target = _uiState.value.viewingUsername
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isRefreshing = true) }
@@ -424,6 +636,16 @@ class HomeViewModel @Inject constructor(
     fun setSortMode(mode: HomeSortMode) {
         _uiState.update { it.copy(sortMode = mode) }
         val target = _uiState.value.viewingUsername
+        
+        val period = when (mode) {
+            HomeSortMode.RECENT, HomeSortMode.MOST_PLAYED, HomeSortMode.TOP_ALBUMS, HomeSortMode.TOP_ARTISTS -> "overall"
+            HomeSortMode.LAST_7_DAYS -> "7day"
+            HomeSortMode.LAST_30_DAYS -> "1month"
+        }
+        if (!_uiState.value.isLocalStatsMode) {
+            preloadTopMeta(target, period)
+        }
+        
         if (mode == HomeSortMode.LAST_7_DAYS && _uiState.value.topTracks7Days.isEmpty()) {
             viewModelScope.launch(Dispatchers.IO) {
                 homeRepository.fetchTopTracksForPeriod("7day", 50, username = target).onSuccess { tracks ->
@@ -478,6 +700,16 @@ class HomeViewModel @Inject constructor(
     }
 
     private fun loadForUsername(username: String) {
+        // Blank / "Guest User" is never a friend's name — it is always your
+        // own disconnected profile, so it always means local mode (this also
+        // covers returnToOwnProfile() after a disconnect).
+        if (!isLastFmUsername(username)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                _uiState.update { it.copy(isLoading = true, error = null, viewingUsername = username) }
+                loadLocalStats(username)
+            }
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update {
                 it.copy(
@@ -506,18 +738,66 @@ class HomeViewModel @Inject constructor(
                             topTracksOverall = data.topTracks,
                             page = data.recent.page,
                             totalPages = data.recent.totalPages,
+                            isLocalStatsMode = false,
                         )
                     }
                     preloadPeriodTracks()
+                    preloadTopMeta(username)
                 },
                 onFailure = { e ->
-                    _uiState.update { it.copy(isLoading = false, error = e.message ?: "Couldn't load that profile") }
+                    // Own profile failing (e.g. key removed while signed in)
+                    // degrades to local mode; friend failures stay errors.
+                    if (!_uiState.value.isViewingFriend) {
+                        runCatching { localStatsRepository.load() }.getOrNull()?.let { local ->
+                            cachedTopTracks = local.topTracks
+                            _uiState.update {
+                                it.copy(
+                                    isLoading = false,
+                                    stats = local.stats,
+                                    nowPlaying = null,
+                                    allTracks = local.topTracks,
+                                    topTracksOverall = local.topTracks,
+                                    topArtists = local.topArtists.take(10),
+                                    topAlbums = local.topAlbums.take(10),
+                                    sortMode = HomeSortMode.MOST_PLAYED,
+                                    isLocalStatsMode = true,
+                                    error = null,
+                                )
+                            }
+                            preloadLocalTags()
+                        } ?: _uiState.update {
+                            it.copy(isLoading = false, error = e.message ?: "Couldn't load that profile")
+                        }
+                    } else {
+                        _uiState.update { it.copy(isLoading = false, error = e.message ?: "Couldn't load that profile") }
+                    }
                 },
             )
         }
     }
 
     fun refreshSilently() {
+        // Local mode: refresh Room aggregates (cheap) instead of polling Last.fm.
+        if (_uiState.value.isLocalStatsMode && !_uiState.value.isViewingFriend) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { localStatsRepository.load() }.onSuccess { local ->
+                    cachedTopTracks = local.topTracks
+                    _uiState.update {
+                        it.copy(
+                            stats = local.stats,
+                            allTracks = local.topTracks,
+                            topTracksOverall = local.topTracks,
+                            topArtists = local.topArtists.take(10),
+                            topAlbums = local.topAlbums.take(10),
+                        )
+                    }
+                }
+                val tags = runCatching { tasteProfileProvider.get().topTags.toList() }
+                    .getOrDefault(emptyList()).take(8)
+                _uiState.update { it.copy(topTags = tags) }
+            }
+            return
+        }
         val target = _uiState.value.viewingUsername
         if (target.isBlank() || target.equals("Guest User", ignoreCase = true)) return
         viewModelScope.launch(Dispatchers.IO) {

@@ -17,6 +17,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -35,6 +36,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.drm.DrmSessionManager
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
@@ -53,6 +55,10 @@ import com.lastwave.app.data.music.YouTubeAudioStream
 import com.lastwave.app.data.music.YOUTUBE_WEB_USER_AGENT
 import com.lastwave.app.data.lossless.LosslessAudioStream
 import com.lastwave.app.data.lossless.LosslessMusicApi
+import com.lastwave.app.data.plugin.ModulePlaybackResolver
+import com.lastwave.app.data.plugin.ModuleDrmFactory
+import com.lastwave.app.data.plugin.SegmentedDashBridge
+import com.lastwave.app.data.plugin.stableCacheKey
 import com.lastwave.app.widget.WidgetUpdater
 import kotlinx.coroutines.flow.first
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -81,6 +87,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -171,6 +178,11 @@ class MusicPlayer @Inject constructor(
     @ApplicationContext context: Context,
     private val innerTube: InnerTubeMusicApi,
     private val losslessMusicApi: LosslessMusicApi,
+    private val moduleResolver: ModulePlaybackResolver,
+    private val moduleDrmFactory: ModuleDrmFactory,
+    private val moduleManager: com.lastwave.app.data.plugin.ModuleManager,
+    private val offlineLicense: com.lastwave.app.data.plugin.ModuleOfflineLicense,
+    private val segBridge: SegmentedDashBridge,
     private val settingsPreferences: SettingsPreferences,
     private val equalizerPreferences: EqualizerPreferences,
     private val discoverRepository: DiscoverRepository,
@@ -179,6 +191,7 @@ class MusicPlayer @Inject constructor(
     private val applicationScope: CoroutineScope,
     private val downloadedTrackDao: dagger.Lazy<com.lastwave.app.data.local.db.DownloadedTrackDao>,
     private val usbDacMonitor: UsbDacMonitor,
+    private val songPlayStatsRepository: dagger.Lazy<com.lastwave.app.data.repository.SongPlayStatsRepository>,
 ) {
     private val appContext = context.applicationContext
     private val streamResolutionWakeLock by lazy {
@@ -315,7 +328,17 @@ class MusicPlayer @Inject constructor(
     private var errorRetryCount = 0
     private var retryMediaId: String? = null
     private val losslessBypassMediaIds = ConcurrentHashMap.newKeySet<String>()
+    // Written by the settings collector, read on the main thread.
+    @Volatile
     private var bitPerfectEnabled = false
+    /**
+     * Whether the native layer actually honors the current Bit-Perfect
+     * request (read back after every [updateBitPerfectState], not just the
+     * DataStore wish). The verdict ANDs this with the sinks' direct-path
+     * state so the badge can never claim Bit-Perfect on a pref alone.
+     */
+    @Volatile
+    private var nativeBitPerfectApplied = false
     /** Previous system level saved when DAC mode auto-maxed it; -1 = untouched. */
     private var savedSystemVolume = -1
     private var dacVolumeManaged = false
@@ -365,6 +388,41 @@ class MusicPlayer @Inject constructor(
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
+    /**
+     * Feeds SongPlayStatsRepository — the real "how much did you actually
+     * listen to this" + skip signal that LocalTasteSuggestionEngine scores
+     * on. Called right before onMediaItemTransition overwrites [_state],
+     * since that's the last moment the outgoing track's position is known.
+     * AUTO transition = the track played out naturally; anything else
+     * (SEEK, via next()/previous()/tapping the queue) with < 85% played is
+     * counted as a skip.
+     */
+    private fun recordLocalListenSignal(reason: Int) {
+        val previousTrack = _state.value.current ?: return
+        val previousPositionMs = _state.value.positionMs
+        val previousDurationMs = _state.value.durationMs
+        if (previousPositionMs <= 0L) return
+        val playedRatio = if (previousDurationMs > 0L) {
+            (previousPositionMs.toDouble() / previousDurationMs.toDouble()).coerceIn(0.0, 1.0)
+        } else 1.0
+        val completedNaturally = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || playedRatio >= 0.85
+        val wasSkip = !completedNaturally
+        applicationScope.launch(Dispatchers.IO) {
+            val repo = songPlayStatsRepository.get()
+            repo.recordListenedMs(
+                title = previousTrack.title,
+                artist = previousTrack.artist,
+                videoId = previousTrack.videoId,
+                artworkUrl = previousTrack.artworkUrl,
+                listenedMs = previousPositionMs,
+                completed = completedNaturally,
+            )
+            if (wasSkip) {
+                repo.recordSkip(previousTrack.title, previousTrack.artist, previousTrack.videoId)
+            }
+        }
+    }
+
     private val listener: Player.Listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             if (player === this@MusicPlayer.player) refresh(player)
@@ -379,6 +437,7 @@ class MusicPlayer @Inject constructor(
         }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (isCasting) return
+            recordLocalListenSignal(reason)
             if (mediaItem != null) {
                 losslessBypassMediaIds.retainAll(setOf(mediaItem.mediaId))
                 if (retryMediaId != mediaItem.mediaId) {
@@ -520,7 +579,7 @@ class MusicPlayer @Inject constructor(
                             allowLocalDownloads = false,
                             videoId = videoId,
                             allowLossless = failedMediaId !in losslessBypassMediaIds,
-                            excludedLosslessUrls = if (failedLosslessStream && retry > 1) {
+                            excludedLosslessUrls = if (failedLosslessStream) {
                                 setOfNotNull(rejectedStream?.url)
                             } else emptySet(),
                         )
@@ -689,7 +748,20 @@ class MusicPlayer @Inject constructor(
         }
 
         return ExoPlayer.Builder(appContext, renderersFactory)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(appContext).setDataSourceFactory(resolving))
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(appContext).setDataSourceFactory(resolving)
+                    // Module-resolved items carry their Widevine session in
+                    // the prepared stream; the session manager (and license
+                    // envelope) comes from the module via ModuleDrmFactory.
+                    // Everything else plays clear as before.
+                    .setDrmSessionManagerProvider { mediaItem ->
+                        val stream = mediaItem.localConfiguration?.customCacheKey
+                            ?.let(preparedStreams::get)
+                        val descriptor = stream?.segmentedDrm
+                        if (descriptor?.drm == null) DrmSessionManager.DRM_UNSUPPORTED
+                        else moduleDrmFactory.sessionManagerFor(descriptor)
+                    },
+            )
             .setLoadControl(loadControl)
             .build().apply {
                 setAudioAttributes(
@@ -733,7 +805,10 @@ class MusicPlayer @Inject constructor(
                     restoredPlayer.repeatMode = restoredSession.repeatMode.takeIf {
                         it in Player.REPEAT_MODE_OFF..Player.REPEAT_MODE_ALL
                     } ?: Player.REPEAT_MODE_OFF
-                    restoredPlayer.setPlaybackSpeed(restoredSession.speed.coerceIn(0.5f, 2f))
+                    // A persisted tempo stretch resamples by definition — it
+                    // must not survive into a Bit-Perfect session.
+                    val restoredSpeed = restoredSession.speed.coerceIn(0.5f, 2f)
+                    restoredPlayer.setPlaybackSpeed(if (bitPerfectEnabled) 1f else restoredSpeed)
                     restoredPlayer.pause()
                 }
             }
@@ -1414,10 +1489,25 @@ class MusicPlayer @Inject constructor(
         // Bit-Perfect applies to every stream (Lossless, YouTube Music, local downloads)
         // Completely bypassing native DSP and Android AudioFX processing.
         val effectiveBitPerfect = bitPerfectEnabled
-        runCatching { nativeAudioEngine.get().setBitPerfect(effectiveBitPerfect) }
+        val primaryOk = runCatching {
+            val engine = nativeAudioEngine.get()
+            engine.setBitPerfect(effectiveBitPerfect)
+            engine.isAvailable && engine.isBitPerfectActive() == effectiveBitPerfect
+        }.getOrDefault(false)
         audioEffectsEngine.setBitPerfectActive(effectiveBitPerfect)
-        secondaryNativeEngine?.setBitPerfect(effectiveBitPerfect)
+        val secondaryOk = secondaryNativeEngine?.let { engine ->
+            runCatching {
+                engine.setBitPerfect(effectiveBitPerfect)
+                engine.isAvailable && engine.isBitPerfectActive() == effectiveBitPerfect
+            }.getOrDefault(false)
+        } ?: true
         secondaryEffects?.setBitPerfectActive(effectiveBitPerfect)
+        nativeBitPerfectApplied = primaryOk && secondaryOk
+        android.util.Log.i(
+            "MusicPlayer",
+            "BIT-PERFECT REQUEST enabled=$effectiveBitPerfect nativeApplied=$nativeBitPerfectApplied " +
+                "(primary=$primaryOk secondary=$secondaryOk)",
+        )
     }
 
     /** Forwards USB-access permission requests to [UsbDacMonitor]. */
@@ -1439,6 +1529,9 @@ class MusicPlayer @Inject constructor(
      * Routes ExoPlayer output to the USB DAC at the track's native rate.
      * Always active when a DAC is present (it can only improve delivery);
      * the Bit-Perfect toggle decides bypass, volume policy and verdict.
+     * The SOURCE rate always drives the output-stream request (44.1/48/
+     * 88.2/96/176.4/192/352.8/384 kHz) — never a fixed 48 kHz — so no
+     * LastWave resampler runs when the route accepts the source format.
      */
     private fun applyDacRoutingFor(sourceRateHz: Int?) {
         val dac = usbDacMonitor.state.value.dac
@@ -1451,8 +1544,13 @@ class MusicPlayer @Inject constructor(
         audioSinks.forEach { sink ->
             sink.setBitPerfectRequested(bitPerfectEnabled)
             runCatching { sink.setPreferredDevice(device) }
-            runCatching { sink.setOutputSampleRateOverride(sourceRateHz?.takeIf { device != null }) }
+            runCatching { sink.setOutputSampleRateOverride(sourceRateHz) }
         }
+        android.util.Log.i(
+            "MusicPlayer",
+            "BIT-PERFECT OUTPUT REQUEST srcRate=$sourceRateHz " +
+                "dac=${dac?.name} routed=${device != null} bitPerfect=$bitPerfectEnabled",
+        )
         usbDacMonitor.setRouteRequested(device != null)
         manageDacSystemVolume(device != null && bitPerfectEnabled)
     }
@@ -1532,6 +1630,17 @@ class MusicPlayer @Inject constructor(
         val dac = usbDacMonitor.state.value.dac
         val srcLabel = snapshot.audioCodec
             ?: if (snapshot.isLossless) "LOSSLESS" else "Audio"
+        // Truthful bypass: the DataStore wish AND the native read-back AND an
+        // actually-direct sink configuration — never the toggle alone. A
+        // mid-track toggle (stale) or a compatibility reroute fails closed.
+        val sinkDirect = audioSinks.any { sink ->
+            runCatching { sink.isBitPerfectBypassActive() }.getOrDefault(false)
+        }
+        val sinkStale = audioSinks.any { sink ->
+            runCatching { sink.isBitPerfectConfigStale() }.getOrDefault(false)
+        }
+        val dspBypassActuallyActive =
+            bitPerfectEnabled && nativeBitPerfectApplied && sinkDirect && !sinkStale
         _signalPath.value = evaluateSignalPath(
             SignalPathInput(
                 sourceLabel = srcLabel,
@@ -1540,8 +1649,10 @@ class MusicPlayer @Inject constructor(
                 isLossless = snapshot.isLossless,
                 appOutputRateHz = appRateHz,
                 platformMixerRateHz = platformRateHz,
-                platformBitPerfectConfigured = audioSinks.any { it.isPlatformBitPerfectConfigured() },
-                dspBypassEnabled = bitPerfectEnabled,
+                platformBitPerfectConfigured = audioSinks.any {
+                    runCatching { it.isPlatformBitPerfectConfigured() }.getOrDefault(false)
+                },
+                dspBypassEnabled = dspBypassActuallyActive,
                 crossfadeMixing = outgoingPlayer != null,
                 speed = speed,
                 appVolume = appVolume,
@@ -2255,10 +2366,27 @@ class MusicPlayer @Inject constructor(
             try {
                 val seedVideoId = seed.videoId?.takeIf(String::isNotBlank)
                     ?: innerTube.findBestMatchOrNull(seed.title, seed.artist, prefetchStreams = false)?.videoId
+                    ?: runCatching { innerTube.fetchCharts().firstOrNull()?.videoId }.getOrNull()
                     ?: return@launch
 
                 radioUsedSeeds.add(seedVideoId)
-                val related = innerTube.fetchRelatedSongs(seedVideoId, limit = RADIO_QUEUE_BATCH_SIZE, prefetchStreams = false)
+                // Smoothly handles both YouTube Music connected and
+                // accountless states: fetchRelatedSongs works with or without
+                // cookies (InnerTube falls back to anonymous). When it comes
+                // back empty (offline / guest with no seed match), public
+                // charts + home songs keep the endless queue alive.
+                val relatedPrimary = runCatching {
+                    innerTube.fetchRelatedSongs(seedVideoId, limit = RADIO_QUEUE_BATCH_SIZE, prefetchStreams = false)
+                }.getOrDefault(emptyList())
+                val related = relatedPrimary.ifEmpty {
+                    if (!radioQueueActive) return@launch
+                    runCatching { innerTube.fetchCharts().take(RADIO_QUEUE_BATCH_SIZE) }
+                        .getOrDefault(emptyList())
+                        .ifEmpty {
+                            runCatching { innerTube.fetchHomeSongs().take(RADIO_QUEUE_BATCH_SIZE) }
+                                .getOrDefault(emptyList())
+                        }
+                }
                 if (related.isEmpty() || !radioQueueActive) return@launch
 
                 val seedTitleLower = seed.title.trim().lowercase()
@@ -2352,7 +2480,20 @@ class MusicPlayer @Inject constructor(
                     ?: return@launch
 
                 radioUsedSeeds.add(seedVideoId)
-                val related = innerTube.fetchRelatedSongs(seedVideoId, limit = RADIO_QUEUE_BATCH_SIZE, prefetchStreams = false)
+                // Same connected/accountless contract as startRadioQueue:
+                // related radio first, public charts/home as the offline pad.
+                val relatedPrimaryExtend = runCatching {
+                    innerTube.fetchRelatedSongs(seedVideoId, limit = RADIO_QUEUE_BATCH_SIZE, prefetchStreams = false)
+                }.getOrDefault(emptyList())
+                val related = relatedPrimaryExtend.ifEmpty {
+                    if (!radioQueueActive) return@launch
+                    runCatching { innerTube.fetchCharts().take(RADIO_QUEUE_BATCH_SIZE) }
+                        .getOrDefault(emptyList())
+                        .ifEmpty {
+                            runCatching { innerTube.fetchHomeSongs().take(RADIO_QUEUE_BATCH_SIZE) }
+                                .getOrDefault(emptyList())
+                        }
+                }
                 if (related.isEmpty() || !radioQueueActive) return@launch
 
                 val knownVideoIds = currentQueue.mapNotNullTo(mutableSetOf()) { it.videoId }
@@ -2498,6 +2639,8 @@ class MusicPlayer @Inject constructor(
         val samplingRateKHz: Double? = null,
         val youtubeCandidate: YouTubeAudioStream? = null,
         val durationMs: Long? = null,
+        /** Provider chunk descriptor; when set, playback is DASH+Widevine. */
+        val segmentedDrm: com.lastwave.app.data.plugin.SegmentedStreamDescriptor? = null,
     )
 
     private fun isNetworkException(error: Throwable): Boolean {
@@ -2527,8 +2670,7 @@ class MusicPlayer @Inject constructor(
     private fun sanitizeFilename(title: String): String =
         title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "track" }
 
-
-    private fun checkAndBuildLocalStream(
+    private suspend fun checkAndBuildLocalStream(
         targetUrl: String,
         displayTitle: String,
         displayArtist: String,
@@ -2558,6 +2700,16 @@ class MusicPlayer @Inject constructor(
         }
 
         if (!isAccessible) return null
+
+        // Module offline download: same bytes as streaming, keys in the
+        // sidecar. Unusable here (no keys / unrenewable expiry) -> null so
+        // playback falls through to streaming instead of failing on ciphertext.
+        offlineModuleStream(
+            targetUrl = targetUrl,
+            uri = uri,
+            displayTitle = displayTitle,
+            displayArtist = displayArtist,
+        )?.let { return it }
 
         val pathLower = (uri.path ?: targetUrl).lowercase()
         val mime = fallbackMime?.takeIf(String::isNotBlank) ?: when {
@@ -2618,6 +2770,70 @@ class MusicPlayer @Inject constructor(
             isLossless = isLossless,
             bitDepth = bitDepth,
             samplingRateKHz = samplingRateKHz,
+        )
+    }
+
+    /**
+     * Offline playback for module downloads: local MPD over the downloaded
+     * bytes + persisted CDM keys. Returns null unless this exact file has
+     * usable keys (fresh or renewed), letting remote streaming take over.
+     */
+    private suspend fun offlineModuleStream(
+        targetUrl: String,
+        uri: Uri,
+        displayTitle: String,
+        displayArtist: String,
+    ): ResolvedStream? {
+        val sidecar = moduleManager.readOfflineSidecar(displayTitle, displayArtist) ?: return null
+        if (sidecar.keySetIdB64.isBlank()) return null
+        val filePath = when {
+            targetUrl.startsWith("content://") -> null
+            targetUrl.startsWith("file://") -> uri.path
+            else -> targetUrl
+        }
+        val matches = (filePath != null && sidecar.audioFilePath == filePath) ||
+            (sidecar.mediaStoreUri.isNotBlank() && sidecar.mediaStoreUri == targetUrl) ||
+            (sidecar.bytes > 0 && filePath != null &&
+                runCatching { File(filePath).length() == sidecar.bytes }.getOrDefault(false))
+        if (!matches) return null
+        val initialDesc = runCatching {
+            persistenceJson.decodeFromString<com.lastwave.app.data.plugin.SegmentedStreamDescriptor>(
+                sidecar.descriptorJson,
+            )
+        }.getOrNull()
+        val drm = initialDesc?.drm ?: return null
+        val readyDesc = initialDesc.copy(drm = drm.copy(keySetIdB64 = sidecar.keySetIdB64, licenseUrl = sidecar.licenseUrl))
+        val finalDesc = if (System.currentTimeMillis() > sidecar.licenseExpiresAtMs) {
+            val renewed = withTimeoutOrNull(OFFLINE_LICENSE_RENEW_TIMEOUT_MS) {
+                offlineLicense.renew(readyDesc, sidecar.keySetIdB64)
+            } ?: return null
+            val updated = readyDesc.copy(
+                drm = readyDesc.drm?.copy(keySetIdB64 = renewed.keySetIdB64),
+            )
+            moduleManager.writeOfflineSidecar(
+                displayTitle, displayArtist,
+                sidecar.copy(
+                    keySetIdB64 = renewed.keySetIdB64,
+                    licenseExpiresAtMs = renewed.licenseExpiresAtMs,
+                    descriptorJson = moduleManager.encodeDescriptor(updated),
+                ),
+            )
+            updated
+        } else {
+            readyDesc
+        }
+        var descriptor = finalDesc
+        val s = descriptor.stream
+        return ResolvedStream(
+            url = segBridge.mpdUriForBase(descriptor, targetUrl).toString(),
+            mimeType = MimeTypes.APPLICATION_MPD,
+            bitrateKbps = s.bandwidth.takeIf { it > 0 }?.div(1000),
+            audioCodec = segBridge.audioBadge(descriptor),
+            cacheKey = "offline:${displayArtist.lowercase()}_${displayTitle.lowercase()}",
+            isLossless = !s.codec.equals("opus", ignoreCase = true),
+            bitDepth = s.bitDepth.takeIf { it > 0 },
+            samplingRateKHz = s.sampleRate.takeIf { it > 0 }?.div(1000.0),
+            segmentedDrm = descriptor,
         )
     }
 
@@ -3029,20 +3245,78 @@ class MusicPlayer @Inject constructor(
         excludedLosslessUrls: Set<String>,
     ): ResolvedStream {
         val isYouTubeRequested = misc.losslessQuality == com.lastwave.app.data.lossless.LosslessMusicApi.QUALITY_YOUTUBE || !misc.preferLosslessStreaming
-        if (!allowLossless || isYouTubeRequested || (!videoId.isNullOrBlank() &&
+        if (isYouTubeRequested || (!videoId.isNullOrBlank() &&
                 (track.artist.isBlank() || track.artist.equals("Unknown artist", ignoreCase = true)))
         ) return resolveYoutubeTrackAudioStream(track, videoId)
 
-        // Resolve both sources together, but always await lossless first. If it
-        // fails, the YouTube result is already being prepared.
+        // Resolve YouTube in background as ultimate fallback
         val youtubeDeferred = applicationScope.async(Dispatchers.IO) {
             resolveYoutubeTrackAudioStream(track, videoId)
         }
+        // Provider modules queried in parallel with backend; priority is Backend -> Module -> YouTube
+        val moduleDeferred = applicationScope.async(Dispatchers.IO) {
+            if (!misc.preferProviderModules) null
+            else resolveModuleTrackAudioStream(track, misc)
+        }
         return try {
-            resolveLosslessTrackAudioStream(track, misc, excludedLosslessUrls) ?: youtubeDeferred.await()
+            val backendStream = if (allowLossless) {
+                resolveLosslessTrackAudioStream(track, misc, excludedLosslessUrls)
+            } else null
+
+            backendStream
+                ?: runCatching {
+                    withTimeoutOrNull(MODULE_RESOLVE_TIMEOUT_MS) { moduleDeferred.await() }
+                }.getOrNull()
+                ?: youtubeDeferred.await()
         } finally {
             youtubeDeferred.cancel()
+            moduleDeferred.cancel()
         }
+    }
+
+    private suspend fun resolveModuleTrackAudioStream(
+        track: PlayableTrack,
+        misc: MiscSettings,
+    ): ResolvedStream? {
+        val descriptor = moduleResolver.resolve(track.title, track.artist, misc.losslessQuality)
+            ?: return null
+        val s = descriptor.stream
+        // Progressive clear module streams play directly like backend URLs.
+        if (s.type == "progressive" || (s.baseUrl.isNotBlank() && s.segments.isEmpty())) {
+            val lossless = !s.codec.equals("opus", ignoreCase = true) &&
+                !s.codec.equals("mp3", ignoreCase = true) &&
+                !s.codec.equals("aac", ignoreCase = true)
+            return ResolvedStream(
+                url = s.baseUrl,
+                mimeType = s.mimeType.ifBlank { "audio/flac" },
+                bitrateKbps = s.bandwidth.takeIf { it > 0 }?.div(1000),
+                audioCodec = if (lossless) {
+                    if ((s.bitDepth) > 16 || (s.sampleRate) > 48000) "HI-RES FLAC" else "LOSSLESS"
+                } else s.codec.uppercase(),
+                cacheKey = "modprog:${descriptor.trackId}:${s.quality}",
+                requestHeaders = descriptor.headers,
+                isLossless = lossless,
+                bitDepth = s.bitDepth.takeIf { it > 0 },
+                samplingRateKHz = s.sampleRate.takeIf { it > 0 }?.div(1000.0),
+            )
+        }
+        return ResolvedStream(
+            url = segBridge.mpdUri(descriptor).toString(),
+            mimeType = MimeTypes.APPLICATION_MPD,
+            bitrateKbps = s.bandwidth.takeIf { it > 0 }?.div(1000),
+            audioCodec = try {
+                moduleResolver.badgeFor(descriptor, segBridge.audioBadge(descriptor))
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                segBridge.audioBadge(descriptor)
+            },
+            cacheKey = descriptor.stableCacheKey(),
+            isLossless = !s.codec.equals("opus", ignoreCase = true),
+            bitDepth = s.bitDepth.takeIf { it > 0 },
+            samplingRateKHz = s.sampleRate.takeIf { it > 0 }?.div(1000.0),
+            segmentedDrm = descriptor,
+        )
     }
 
     private suspend fun resolveLosslessTrackAudioStream(
@@ -3070,7 +3344,7 @@ class MusicPlayer @Inject constructor(
             else -> "LOSSLESS"
         }
         // One stable CacheDataSource key per track + quality (no per-URL hash).
-        // Amazon FLAC URLs are signed and rotate; keying by URL fragments the
+        // Provider FLAC URLs are signed and rotate; keying by URL fragments the
         // disk cache so backward/forward seeks can never hit locally cached
         // ranges. Playback reads (via ResolvingDataSource customCacheKey) and
         // the progressive current-stream cacher below share this key, so
@@ -3564,6 +3838,10 @@ class MusicPlayer @Inject constructor(
         const val CURRENT_TRACK_CACHE_MAX_SKIP_WINDOWS = 64
         const val MAX_PREPARED_STREAMS = 256
         const val RESOLVED_URL_EXPIRY_MARGIN_MS = 2 * 60 * 1000L
+        /** Module lookups must never stall the YouTube fallback behind them. */
+        const val MODULE_RESOLVE_TIMEOUT_MS = 25_000L
+        /** Offline license renewal attempt before giving up to streaming. */
+        const val OFFLINE_LICENSE_RENEW_TIMEOUT_MS = 8_000L
         val PERMANENT_PLAYBACK_ERROR_CODES = setOf(
             PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
             PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
@@ -3608,6 +3886,11 @@ private fun PlayableTrack.toMediaItem(resolved: MusicPlayer.ResolvedStream? = nu
             (resolved?.mimeType ?: playbackMimeType)?.takeIf(String::isNotBlank)?.let(::setMimeType)
             resolved?.let {
                 setCustomCacheKey(it.cacheKey)
+                // Segmented provider module: MPD uri + Widevine config so the
+                // stock DASH source decrypts chunk-by-chunk via MediaCrypto.
+                it.segmentedDrm?.let { descriptor ->
+                    SegmentedDashBridge.drmConfigurationFor(descriptor)?.let(::setDrmConfiguration)
+                }
             }
         }
         .setMediaMetadata(
@@ -3625,7 +3908,7 @@ private fun PlayableTrack.toMediaItem(resolved: MusicPlayer.ResolvedStream? = nu
         .build()
 }
 
-private fun PlayableTrack.mediaIdKey(): String = when {
+    private fun PlayableTrack.mediaIdKey(): String = when {
     !playbackUrl.isNullOrBlank() -> "local:${playbackUrl}"
     !videoId.isNullOrBlank() -> videoId
     else -> "query:${artist.lowercase()}|${title.lowercase()}"

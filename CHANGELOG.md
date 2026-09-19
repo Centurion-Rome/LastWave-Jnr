@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+### Added
+- **One-tap "Save album to library" on the album detail screen (#79).**
+  Previously an album could only be kept by adding its songs one by one to
+  a custom playlist. The album hero now has a save button that stores all
+  tracks via `PlaylistRepository`, mirroring the feed playlist detail's
+  save flow (saving / saved / error states). Shared-playlist pages already
+  had this via the feed detail screen.
+
+  Files changed:
+  `app/src/main/java/com/lastwave/app/ui/album/AlbumViewModel.kt`
+  `app/src/main/java/com/lastwave/app/ui/album/AlbumDetailScreen.kt`
+
+### Fixed
+- **Search returning no results for Cyrillic / non-Latin queries (#102).**
+  Title/artist matching used a Latin-only word pattern (`[^a-z0-9]+`),
+  reducing every non-Latin query to blank, and the Songs-filtered search had
+  no fallback when the filter matched nothing. Matching now uses a
+  Unicode-aware pattern (letters + numbers from any script) with
+  locale-independent case folding, and an empty filtered search retries once
+  unfiltered. Matching helpers were extracted to `TextMatch` with unit tests
+  covering Cyrillic, CJK and Arabic input.
+
+  Files changed:
+  `app/src/main/java/com/lastwave/app/data/music/TextMatch.kt` (new),
+  `app/src/main/java/com/lastwave/app/data/music/InnerTubeMusicApi.kt`,
+  `app/src/test/java/com/lastwave/app/data/music/TextMatchTest.kt` (new)
+
+### Fixed
+- **Home-screen widget stuck on the previous song (#94).**
+  Two publishers wrote the same widget snapshot with independent dedup
+  guards: the playback service (authoritative, fires on every player-state
+  transition) and the scrobble listener (watches all media sessions,
+  including our own, on an async binder timeline). During a track change
+  the listener could still see the previous track's session metadata and
+  overwrite the fresh snapshot last, with nothing re-firing afterwards.
+  The listener now yields while our own session is active and otherwise
+  only elects external packages, and snapshot write + refresh in
+  `WidgetUpdater` is mutex-serialized against interleaved publishers.
+
+  Files changed:
+  `app/src/main/java/com/lastwave/app/service/MediaScrobbleListenerService.kt`
+  `app/src/main/java/com/lastwave/app/widget/WidgetUpdater.kt`
+
+### Fixed
+- **Logged-out YouTube Music playlists collapsing to a dead "Tap Retry" error.**
+  `InnerTubeMusicApi.fetchPlaylist()` treated ANY single continuation-page
+  failure (rate-limit/offline blip while paging a large playlist) as a total
+  failure and returned null — discarding tracks already loaded — so the
+  detail screen showed `Error` and every retry re-fetched from scratch into
+  the same failure. Continuation failures now keep the collected prefix and
+  return it with `isComplete = false` (null is kept only when zero tracks
+  loaded, preserving every caller's existing contract); failures are logged
+  to logcat under `LastWavePlaylist` with browseId + stage for diagnosis.
+  `FeedPlaylistDetailViewModel` shows truncated results with an inline
+  "Some tracks couldn't load. Retry." affordance instead of the dead error,
+  and `YtMusicLibraryManager` no longer poisons the disk cache / track
+  count with truncated snapshots (null count forces a network refresh next
+  open).
+
+  Files changed:
+  `app/src/main/java/com/lastwave/app/data/music/InnerTubeMusicApi.kt`
+  `app/src/main/java/com/lastwave/app/ui/feed/FeedPlaylistDetailViewModel.kt`
+  `app/src/main/java/com/lastwave/app/data/ytmusic/YtMusicLibraryManager.kt`
+
+### Author: musaibbhat120605
+**Date:** September 16, 2026
+
+###Musaib Bhat will step down as the developer of LastWave on 16 September 2026. His contributions have been invaluable, and his work will always remain a cornerstone for our community.
+
+#### Added
+- **SongPlayStatsEntity + SongPlayStatsDao** — local per-track listening stats (total play time, skip count, play count, last played).
+- **SongPlayStatsRepository** — records listened time and skips.
+- **LocalTasteSuggestionEngine** — local, Last.fm-free recommendation engine (ported scoring model: play time, skip penalty, liked bonus, recency, time-of-day), seeded via existing `InnerTubeMusicApi.fetchRelatedSongs`.
+- **Room migration 12 → 13** — creates `song_play_stats` table without wiping existing data.
+
+#### Changed
+- **MusicPlayer.kt** — hooks `onMediaItemTransition` to record listened duration and detect skips (non-AUTO transition + <85% played).
+- **AppDatabase.kt / DatabaseModule.kt** — registers the new entity/DAO, bumps DB version, adds migration.
+- **FeedScreen.kt** — redesigned `QuickTilesGrid`/`QuickTileCard` (Liked Songs / Mix / New Releases): equal-width scrollable cards with per-type gradient icons, replacing the old grid-chunked layout that left an orphaned half-row.
+
+#### Not yet wired
+- `LocalTasteSuggestionEngine.run()` isn't called from any screen yet — integration notes are in the file itself (Feed's discover section or as a Last.fm fallback in `GenerateRepository`).
+
 ### Fixed
 - **Player state and cached track lost after leaving the app in the background with nothing playing.** (Fix by [@musaibbhat120605](https://github.com/musaibbhat120605))
 

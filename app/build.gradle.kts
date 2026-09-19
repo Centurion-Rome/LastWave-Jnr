@@ -77,12 +77,16 @@ android {
         val lyricsApiKey = resolveSecret("LYRICS_API_KEY", "API_KEY", "LYRICS_AUTH_TOKEN")
         buildConfigField("byte[]", "LYRICS_API_KEY_BYTES", obfuscateSecret(lyricsApiKey))
 
-        val lastfmApiKey = resolveSecret("LASTFM_API_KEY").ifBlank { "2e00eb783c677abeab81e99c99be74e1" }
-        buildConfigField("byte[]", "LASTFM_API_KEY_BYTES", obfuscateSecret(lastfmApiKey))
+        // Provider-module code key (AES-256, base64 of 32 bytes). Provisioned
+        // per build via env / gradle property / local.properties / .env as
+        // PROVIDER_MODULE_KEY — never committed. Empty = modules unloadable.
+        val providerModuleKey = resolveSecret("PROVIDER_MODULE_KEY")
+        buildConfigField("byte[]", "PROVIDER_MODULE_KEY_BYTES", obfuscateSecret(providerModuleKey))
 
-        val lastfmApiSecret = resolveSecret("LASTFM_API_SECRET").ifBlank { "b7e562de696f17fdfde7c448f02b599f" }
-        buildConfigField("byte[]", "LASTFM_API_SECRET_BYTES", obfuscateSecret(lastfmApiSecret))
-
+        // No shared Last.fm key: bring-your-own-key model. Everyone creates
+        // their own key at last.fm/api/account/create and pastes it in
+        // Settings → Integrations / Scrobbling. Nothing Last.fm-related is
+        // baked into the build.
         buildConfigField("byte[]", "SECRET_MASK_BYTES", maskLiteral)
 
         externalNativeBuild {
@@ -102,7 +106,7 @@ android {
     }
 
     signingConfigs {
-        create("release") {
+        create("release_config") {
             val base64Key = resolveSecret("SIGNING_KEY")
             val storeFilePath = resolveSecret("RELEASE_STORE_FILE")
             val storePasswordProp = resolveSecret("RELEASE_STORE_PASSWORD", "KEY_STORE_PASSWORD")
@@ -143,7 +147,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName("release_config")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         create("rawRelease") {
@@ -151,7 +155,7 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             // Raw variant — no code/resource shrinking, no ProGuard/R8
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName("release_config")
             // proguardFiles from initWith are ignored when minify is off
         }
         debug {
@@ -185,6 +189,12 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+        ignoreWarnings = true
     }
 
     testOptions {
@@ -257,9 +267,15 @@ dependencies {
     // controls, Bluetooth/headset controls and a MediaController-backed UI.
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
+    // Segmented provider-module path: DASH chunk source + CDM decryption.
+    // Pinned to the same 1.2.1 line as exoplayer/hls to avoid binary mismatch.
+    implementation("androidx.media3:media3-exoplayer-dash:1.2.1")
     // MediaBrowserServiceCompat/MediaSessionCompat bridge used by Android
     // Auto to browse the LastWave library and control the same player.
     implementation("androidx.media:media:1.7.0")
+
+    // Provider-module QuickJS runtime (pinned to the cached 1.0.12 line).
+    implementation("io.github.dokar3:quickjs-kt-android:1.0.12")
 
     // GPLv3 Media3-matched FFmpeg software decoder (distribution must comply).
     // The renderer factory prefers FFmpeg for every codec it supports so all

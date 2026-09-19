@@ -98,9 +98,7 @@ class HomeRepository @Inject constructor(
     }
 
     private suspend fun requireSession(): com.lastwave.app.data.local.SessionData =
-        sessionPreferences.session.first().let { session ->
-            session.copy(apiKey = session.apiKey.ifBlank { com.lastwave.app.data.network.LastFmAppCredentials.API_KEY })
-        }
+        sessionPreferences.session.first()
 
     /** Every fetch below takes an optional [username] override for viewing
      *  a friend's profile (see fetchFriends/§ Home friend-switching). */
@@ -508,7 +506,7 @@ class HomeRepository @Inject constructor(
 
     private suspend fun fetchInitialDataInternal(username: String): Result<HomeInitialData> = try {
         coroutineScope {
-            val recentDeferred = async(Dispatchers.IO) { fetchRecentTracks(username = username) }
+            val recentDeferred = async(Dispatchers.IO) { fetchRecentTracks(limit = 200, username = username) }
             val statsDeferred = async(Dispatchers.IO) { fetchStats(username = username) }
             val topTracksDeferred = async(Dispatchers.IO) { fetchTopTracksOverall(username = username) }
 

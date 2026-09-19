@@ -27,9 +27,13 @@ import kotlinx.coroutines.flow.stateIn
 import android.os.Handler
 import android.os.Looper
 import javax.inject.Inject
+import com.lastwave.app.data.local.ThemeMode
 import javax.inject.Singleton
 
 data class ThemeUiState(
+    val darkColorScheme: ColorScheme,
+    val lightColorScheme: ColorScheme,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val colorScheme: ColorScheme,
     val amoled: Boolean,
     val mode: AccentMode,
@@ -188,20 +192,34 @@ class ThemeRepository @Inject constructor(
     ) { prefs: ThemePrefs, dynamic: String?, nowPlaying: String?, misc: MiscSettings ->
         val isAmoled = prefs.amoled
         val isGlass = prefs.liquidGlass
-        val scheme = when {
-            misc.dynamicNowPlayingEnabled && nowPlaying != null ->
-                Md3SchemeBuilder.buildScheme(nowPlaying, isAmoled, isGlass)
-            prefs.accentMode == AccentMode.MONOCHROME ->
-                Md3SchemeBuilder.buildMonochromeScheme(isAmoled, isGlass)
+        val (darkScheme, lightScheme) = when {
+            misc.dynamicNowPlayingEnabled && nowPlaying != null -> {
+                val dark = Md3SchemeBuilder.buildDarkScheme(nowPlaying, isAmoled, isGlass)
+                val light = Md3SchemeBuilder.buildLightScheme(nowPlaying, isGlass)
+                dark to light
+            }
+            prefs.accentMode == AccentMode.MONOCHROME -> {
+                val dark = Md3SchemeBuilder.buildMonochromeDarkScheme(isAmoled, isGlass)
+                val light = Md3SchemeBuilder.buildMonochromeLightScheme(isGlass)
+                dark to light
+            }
             prefs.accentMode == AccentMode.DYNAMIC -> {
                 val seed = dynamic ?: getSystemWallpaperColorHex() ?: prefs.accentColor
-                Md3SchemeBuilder.buildScheme(seed, isAmoled, isGlass)
+                val dark = Md3SchemeBuilder.buildDarkScheme(seed, isAmoled, isGlass)
+                val light = Md3SchemeBuilder.buildLightScheme(seed, isGlass)
+                dark to light
             }
-            else ->
-                Md3SchemeBuilder.buildScheme(prefs.accentColor, isAmoled, isGlass)
+            else -> {
+                val dark = Md3SchemeBuilder.buildDarkScheme(prefs.accentColor, isAmoled, isGlass)
+                val light = Md3SchemeBuilder.buildLightScheme(prefs.accentColor, isGlass)
+                dark to light
+            }
         }
         ThemeUiState(
-            colorScheme = scheme,
+            darkColorScheme = darkScheme,
+            lightColorScheme = lightScheme,
+            themeMode = prefs.themeMode,
+            colorScheme = darkScheme,
             amoled = isAmoled,
             mode = prefs.accentMode,
             accentColorHex = prefs.accentColor,
@@ -212,7 +230,10 @@ class ThemeRepository @Inject constructor(
         applicationScope,
         SharingStarted.Eagerly,
         ThemeUiState(
-            colorScheme = Md3SchemeBuilder.buildScheme("#E03030", false),
+            darkColorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false),
+            lightColorScheme = Md3SchemeBuilder.buildLightScheme("#E03030", false),
+            themeMode = ThemeMode.SYSTEM,
+            colorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false),
             amoled = false,
             mode = AccentMode.MANUAL,
             accentColorHex = "#E03030",
@@ -220,6 +241,10 @@ class ThemeRepository @Inject constructor(
             liquidGlass = false,
         ),
     )
+
+    suspend fun setThemeMode(mode: ThemeMode) {
+        themePreferences.setThemeMode(mode)
+    }
 
     suspend fun setManualAccent(color: Color) {
         val hex = color.toHex()

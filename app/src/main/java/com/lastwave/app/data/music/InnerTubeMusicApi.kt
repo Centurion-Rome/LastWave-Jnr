@@ -40,7 +40,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.security.MessageDigest
-import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -110,6 +109,10 @@ data class YouTubePlaylistResult(
     val artworkUrl: String? = null,
     val trackCount: Int = 0,
     val tracks: List<YouTubeMusicTrack> = emptyList(),
+    /** False when continuation pages failed mid-load and [tracks] is only a
+     *  prefix. Callers showing this must offer retry instead of caching it
+     *  as the full playlist. */
+    val isComplete: Boolean = true,
 )
 
 data class YouTubePlaylistSummary(
@@ -260,7 +263,16 @@ class InnerTubeMusicApi @Inject constructor(
             else -> "VL$rawId"
         }
 
-        val (root, authenticatedAs) = fetchPlaylistRoot(browseId) ?: return@withContext null
+        val rootResult = runCatching { fetchPlaylistRoot(browseId) }
+        val (root, authenticatedAs) = rootResult.getOrNull() ?: run {
+            val cause = rootResult.exceptionOrNull()?.javaClass?.simpleName
+                ?: "null-response"
+            android.util.Log.w(
+                PLAYLIST_LOG_TAG,
+                "playlist-root-failed browseId=$browseId error=$cause",
+            )
+            return@withContext null
+        }
         val header = playlistHeader(root)
 
         val title = extractTitleFromHeader(header, root)
@@ -277,7 +289,14 @@ class InnerTubeMusicApi @Inject constructor(
         fun trackContainers(page: JsonElement): List<JsonElement> =
             if (playlistPage) playlistTrackContainers(page) else listOf(page)
         val containers = trackContainers(root)
-        if (containers.isEmpty()) return@withContext null
+        if (containers.isEmpty()) {
+            val topKeys = (root as? JsonObject)?.keys?.take(8)?.joinToString(",").orEmpty()
+            android.util.Log.w(
+                PLAYLIST_LOG_TAG,
+                "playlist-empty-containers browseId=$browseId keys=$topKeys",
+            )
+            return@withContext null
+        }
         val initialSongs = containers.flatMap(::parseSongRenderers).distinctBy { it.videoId }.let { parsed ->
             trackLimit?.let { parsed.take(it) } ?: parsed
         }
@@ -294,18 +313,40 @@ class InnerTubeMusicApi @Inject constructor(
         }
         val seenTokens = mutableSetOf<String>()
         var page = 0
+        var truncated = false
         while (
             !token.isNullOrBlank() &&
             page < MAX_CONTINUATION_PAGES &&
             (trackLimit == null || songs.size < trackLimit)
         ) {
             val currentToken = token ?: break
-            if (!seenTokens.add(currentToken)) return@withContext null
+            if (!seenTokens.add(currentToken)) {
+                truncated = true
+                break
+            }
             val nextPage = runCatching {
                 browseContinuation(currentToken, authenticated = authenticatedAs)
-            }.getOrNull() ?: return@withContext null
+            }.getOrNull()
+            if (nextPage == null) {
+                // Transient page failure (rate-limit/offline): keep the tracks
+                // already collected instead of failing the whole playlist —
+                // callers surface isComplete=false with a retry affordance.
+                android.util.Log.w(
+                    PLAYLIST_LOG_TAG,
+                    "playlist-continuation-failed browseId=$browseId page=$page collected=${songs.size}",
+                )
+                truncated = true
+                break
+            }
             val pageContainers = trackContainers(nextPage)
-            if (pageContainers.isEmpty()) return@withContext null
+            if (pageContainers.isEmpty()) {
+                android.util.Log.w(
+                    PLAYLIST_LOG_TAG,
+                    "playlist-continuation-empty browseId=$browseId page=$page collected=${songs.size}",
+                )
+                truncated = true
+                break
+            }
             val pageSongs = pageContainers.flatMap(::parseSongRenderers)
             val knownVideoIds = songs.mapTo(mutableSetOf()) { it.videoId }
             val newSongs = pageSongs
@@ -316,10 +357,23 @@ class InnerTubeMusicApi @Inject constructor(
             token = continuation(pageContainers)
             page++
         }
-        if (!token.isNullOrBlank() && (trackLimit == null || songs.size < trackLimit)) return@withContext null
+        if (!token.isNullOrBlank() && (trackLimit == null || songs.size < trackLimit)) truncated = true
         if (trackLimit == null && songs.isNotEmpty()) onPageLoaded?.invoke(songs.toList())
+        if (truncated) {
+            android.util.Log.w(
+                PLAYLIST_LOG_TAG,
+                "playlist-truncated browseId=$browseId collected=${songs.size} pages=$page",
+            )
+        }
 
         songs.take(3).forEach { prefetchStream(it.videoId) }
+        // Zero tracks means nothing usable loaded (root error page, private /
+        // deleted playlist, or blocked request) — keep the null contract so
+        // callers fall back to cached data / error UI instead of an empty list.
+        if (songs.isEmpty()) {
+            android.util.Log.w(PLAYLIST_LOG_TAG, "playlist-no-tracks browseId=$browseId")
+            return@withContext null
+        }
         YouTubePlaylistResult(
             id = rawId,
             title = title ?: "",
@@ -327,6 +381,7 @@ class InnerTubeMusicApi @Inject constructor(
             artworkUrl = artworkUrl,
             trackCount = songs.size,
             tracks = songs,
+            isComplete = !truncated,
         )
     }
 
@@ -996,21 +1051,32 @@ class InnerTubeMusicApi @Inject constructor(
     ): List<YouTubeMusicTrack> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
         val config = getWebConfig()
-        val body = buildJsonObject {
-            put("context", context("WEB_REMIX", config.clientVersion, config.visitorData))
-            put("query", query.trim())
-            // YouTube Music's Songs filter, decoded (the endpoint JSON body
-            // accepts the base64 value directly).
-            put("params", "EgWKAQIIAWoKEAkQBRAKEAMQBA==")
+        suspend fun runSearch(params: String?): List<YouTubeMusicTrack> {
+            val body = buildJsonObject {
+                put("context", context("WEB_REMIX", config.clientVersion, config.visitorData))
+                put("query", query.trim())
+                if (params != null) put("params", params)
+            }
+            val root = post(
+                url = "$MUSIC_API/search?key=${config.apiKey}&prettyPrint=false",
+                body = body,
+                clientName = "WEB_REMIX",
+                clientVersion = config.clientVersion,
+                userAgent = WEB_USER_AGENT,
+            )
+            return parseSongRenderers(root).take(limit)
         }
-        val root = post(
-            url = "$MUSIC_API/search?key=${config.apiKey}&prettyPrint=false",
-            body = body,
-            clientName = "WEB_REMIX",
-            clientVersion = config.clientVersion,
-            userAgent = WEB_USER_AGENT,
-        )
-        val results = parseSongRenderers(root).take(limit)
+        // YouTube Music's Songs filter, decoded (the endpoint JSON body
+        // accepts the base64 value directly).
+        val filtered = runSearch("EgWKAQIIAWoKEAkQBRAKEAMQBA==")
+        val results = if (filtered.isNotEmpty()) {
+            filtered
+        } else {
+            // The Songs filter can return nothing for non-Latin queries
+            // (e.g. Cyrillic) that the unfiltered search still matches —
+            // fall back instead of reporting "no results" (issue #102).
+            runCatching { runSearch(null) }.getOrDefault(emptyList())
+        }
         if (prefetchStreams) results.take(2).forEach { prefetchStream(it.videoId) }
         results
     }
@@ -2609,50 +2675,14 @@ class InnerTubeMusicApi @Inject constructor(
         return parts.fold(0) { total, part -> total * 60 + part }
     }
 
-    private fun similarity(a: String, b: String): Int {
-        val normA = normalize(a)
-        val normB = normalize(b)
-        if (normA == normB) return 100
-        if (normA.isNotBlank() && normB.isNotBlank()) {
-            if (normA.contains(normB) || normB.contains(normA)) {
-                val ratio = (minOf(normA.length, normB.length) * 100) / maxOf(normA.length, normB.length)
-                if (ratio >= 45) return maxOf(85, ratio)
-            }
-        }
-        val left = tokens(a)
-        val right = tokens(b)
-        if (left.isEmpty() || right.isEmpty()) return 0
-        val common = left.intersect(right).size
-        val dice = (200 * common) / (left.size + right.size)
-        val subset = if (common == minOf(left.size, right.size) && common > 0) 80 else 0
-        return maxOf(dice, subset)
-    }
+    private fun similarity(a: String, b: String): Int = TextMatch.similarity(a, b)
 
-    private fun matchScore(candidate: YouTubeMusicTrack, title: String, artist: String): Int {
-        val wantedTitle = normalize(title)
-        val wantedArtist = normalize(artist)
-        val candidateTitle = normalize(candidate.title)
-        val candidateArtist = normalize(candidate.artist)
-        var score = maxOf(
-            similarity(candidate.title, title),
-            similarity(baseTitle(candidate.title), baseTitle(title)),
-        ) * 5 + similarity(candidate.artist, artist) * 3
-        if (candidateTitle == wantedTitle) score += 600
-        if (wantedArtist.isNotBlank() && candidateArtist == wantedArtist) score += 350
-        val wantedVariants = tokens(title).intersect(VARIANT_WORDS)
-        val unexpectedVariants = tokens(candidate.title).intersect(VARIANT_WORDS) - wantedVariants
-        score -= unexpectedVariants.size * 250
-        return score
-    }
+    private fun matchScore(candidate: YouTubeMusicTrack, title: String, artist: String): Int =
+        TextMatch.matchScore(candidate, title, artist)
 
-    private fun tokens(value: String): Set<String> = normalize(value)
-        .split(' ')
-        .filter { it.isNotBlank() && it !in MATCH_NOISE_WORDS }
-        .toSet()
+    private fun tokens(value: String): Set<String> = TextMatch.tokens(value)
 
-    private fun baseTitle(value: String): String = value
-        .replace(FEATURING_CLAUSE, " ")
-        .replace(VERSION_CLAUSE, " ")
+    private fun baseTitle(value: String): String = TextMatch.baseTitle(value)
 
     private fun String.highResolutionArtwork(): String {
         val url = if (startsWith("//")) "https:$this" else this
@@ -2663,11 +2693,7 @@ class InnerTubeMusicApi @Inject constructor(
         }
     }
 
-    private fun normalize(value: String): String = Normalizer.normalize(value.lowercase(), Normalizer.Form.NFD)
-        .replace(DIACRITICS, "")
-        .replace(NON_WORD, " ")
-        .trim()
-        .replace(MULTI_SPACE, " ")
+    private fun normalize(value: String): String = TextMatch.normalize(value)
 
     private data class SharedStreamRequest(
         val deferred: Deferred<YouTubeAudioStream>,
@@ -2742,16 +2768,6 @@ class InnerTubeMusicApi @Inject constructor(
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        val NON_WORD = Regex("[^a-z0-9]+")
-        val DIACRITICS = Regex("\\p{M}+")
-        val MULTI_SPACE = Regex("\\s+")
-        val VARIANT_WORDS = setOf(
-            "live", "remix", "karaoke", "cover", "instrumental", "slowed", "sped", "nightcore",
-            "acoustic", "demo", "edit", "remaster", "remastered", "mono", "stereo",
-        )
-        val MATCH_NOISE_WORDS = setOf("official", "audio", "video", "visualizer", "lyrics", "lyric")
-        val FEATURING_CLAUSE = Regex("(?i)[(\\[]\\s*(feat(?:uring)?|ft)\\.?\\s+.*?[)\\]]")
-        val VERSION_CLAUSE = Regex("(?i)[(\\[][^)\\]]*(live|remix|acoustic|demo|edit|remaster(?:ed)?|mono|stereo)[^)\\]]*[)\\]]")
         val CLIENT_IDS = mapOf(
             "WEB_REMIX" to "67",
             "IOS" to "5",
@@ -2817,6 +2833,7 @@ class InnerTubeMusicApi @Inject constructor(
         const val NEWPIPE_SOURCE = "NEWPIPE"
         const val ANONYMOUS_AUTH_SCOPE = "anonymous"
         const val STREAM_LOG_TAG = "LastWaveStream"
+        const val PLAYLIST_LOG_TAG = "LastWavePlaylist"
         const val WEB_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
         const val FALLBACK_WEB_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
         const val FALLBACK_WEB_VERSION = "1.20260707.12.00"

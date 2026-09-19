@@ -78,6 +78,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -153,16 +154,22 @@ import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.R
 import com.lastwave.app.data.local.AccentMode
+import com.lastwave.app.data.local.ThemeMode
 import com.lastwave.app.data.local.EQ_BAND_FREQS_HZ
 import com.lastwave.app.data.local.EQ_MAX_GAIN_DB
 import com.lastwave.app.data.local.EqualizerPresets
 import com.lastwave.app.data.local.EqualizerSettings
 import com.lastwave.app.data.local.eqBandLabel
+import com.lastwave.app.ui.common.ConnectedButtonGroup
+import com.lastwave.app.ui.common.ConnectedButtonItem
 import com.lastwave.app.ui.common.ExpressiveHeader
 import com.lastwave.app.ui.common.safeDrawingBottomPadding
 import com.lastwave.app.ui.common.safeHorizontalContentPadding
 import com.lastwave.app.ui.common.adaptiveContentWidth
 import com.lastwave.app.ui.theme.ExpressivePillShape
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.DarkMode
 import kotlin.math.roundToInt
 
 private data class AccentPreset(val name: String, val hex: String)
@@ -241,10 +248,12 @@ fun SettingsScreen(
     onLoggedOut: () -> Unit = {},
     onOpenChooseApps: () -> Unit = {},
     onOpenDownloads: () -> Unit = {},
+    onOpenModules: () -> Unit = {},
     onOpenHomeSections: () -> Unit = {},
     onOpenExcludedSongs: () -> Unit = {},
     onOpenYouTubeImport: () -> Unit = {},
     onOpenYouTubeLogin: () -> Unit = {},
+    onOpenExternalImport: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val session by viewModel.session.collectAsStateWithLifecycle()
@@ -265,7 +274,25 @@ fun SettingsScreen(
     val hiddenYtLibraryPlaylistIds by viewModel.hiddenYtLibraryPlaylistIds.collectAsStateWithLifecycle()
     val eq by viewModel.equalizer.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
+    val isLastFmConnected by viewModel.isLastFmConnected.collectAsStateWithLifecycle()
+    val hasApiKey by viewModel.hasApiKey.collectAsStateWithLifecycle()
+    val lastFmAuthUrl by viewModel.lastFmAuthUrl.collectAsStateWithLifecycle()
+    val lastFmConnecting by viewModel.lastFmConnecting.collectAsStateWithLifecycle()
     val context = LocalContext.current
+
+    // Last.fm web auth (Settings → Integrations): open the auth URL in Custom
+    // Tabs the moment SettingsViewModel produces one.
+    androidx.compose.runtime.LaunchedEffect(lastFmAuthUrl) {
+        lastFmAuthUrl?.let { url ->
+            runCatching {
+                androidx.browser.customtabs.CustomTabsIntent.Builder().build()
+                    .launchUrl(context, android.net.Uri.parse(url))
+            }.onFailure {
+                viewModel.showToast("No browser available to connect Last.fm")
+                viewModel.cancelLastFmConnect()
+            }
+        }
+    }
     var showQualityDialog by remember { mutableStateOf(false) }
     var showDownloadQualityDialog by remember { mutableStateOf(false) }
     var showEqSheet by remember { mutableStateOf(false) }
@@ -339,11 +366,32 @@ fun SettingsScreen(
             modifier = Modifier.safeHorizontalContentPadding(),
         ) {
             item {
-                AccountCard(
-                    isSignedIn = session.username.isNotBlank(),
-                    username = session.username,
-                    onLogOut = { viewModel.logOut(onLoggedOut) },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SectionLabel("Integrations / Scrobbling")
+                    // Last.fm is optional here — never a gate. Connected:
+                    // global scrobbles + stats sync. Disconnected: Stats and
+                    // recommendations run local-first from Room.
+                    LastFmIntegrationCard(
+                        isConnected = isLastFmConnected,
+                        username = session.username,
+                        connecting = lastFmConnecting,
+                        awaitingApproval = lastFmAuthUrl != null,
+                        hasApiKey = hasApiKey,
+                        onConnect = { viewModel.beginLastFmConnect() },
+                        onCancel = viewModel::cancelLastFmConnect,
+                        onDisconnect = viewModel::disconnectLastFm,
+                        onSaveKeys = viewModel::saveApiCredentials,
+                        onRemoveKey = viewModel::clearApiKey,
+                        onOpenCreateKeyPage = {
+                            runCatching {
+                                androidx.browser.customtabs.CustomTabsIntent.Builder().build()
+                                    .launchUrl(context, android.net.Uri.parse(LAST_FM_CREATE_KEY_URL))
+                            }.onFailure {
+                                viewModel.showToast("No browser available to open Last.fm")
+                            }
+                        },
+                    )
+                }
             }
 
             item {
@@ -559,21 +607,78 @@ fun SettingsScreen(
             }
 
             item {
+                Card(
+                    onClick = onOpenModules,
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.secondary),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.Extension,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSecondary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.settings_modules_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                stringResource(R.string.settings_modules_sub),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                            )
+                        }
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowForwardIos,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+
+            item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_appearance))
-                    SettingsGroup(rowCount = 5) { index, position ->
+                    SettingsGroup(rowCount = 6) { index, position ->
                         when (index) {
-                            0 -> SettingsToggleCard(
+                            0 -> ThemeModeSelectorCard(
+                                currentThemeMode = theme?.themeMode ?: ThemeMode.SYSTEM,
+                                onSelectThemeMode = viewModel::setThemeMode,
+                                position = position,
+                            )
+                            1 -> SettingsToggleCard(
                                 icon = Icons.Filled.Contrast,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
                                 title = stringResource(R.string.settings_amoled),
                                 subtitle = stringResource(R.string.settings_amoled_sub),
                                 checked = theme?.amoled ?: false,
+                                enabled = theme?.themeMode != ThemeMode.LIGHT,
                                 onCheckedChange = viewModel::setAmoled,
                                 position = position,
                             )
-                            1 -> SettingsToggleCard(
+                            2 -> SettingsToggleCard(
                                 icon = Icons.Filled.Palette,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -585,7 +690,7 @@ fun SettingsScreen(
                                 },
                                 position = position,
                             )
-                            2 -> SettingsToggleCard(
+                            3 -> SettingsToggleCard(
                                 icon = Icons.Filled.Album,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -595,7 +700,7 @@ fun SettingsScreen(
                                 onCheckedChange = viewModel::setDynamicNowPlaying,
                                 position = position,
                             )
-                            3 -> SettingsToggleCard(
+                            4 -> SettingsToggleCard(
                                 icon = Icons.Filled.TextFields,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -605,7 +710,7 @@ fun SettingsScreen(
                                 onCheckedChange = viewModel::setUseCustomFont,
                                 position = position,
                             )
-                            4 -> SettingsActionCard(
+                            5 -> SettingsActionCard(
                                 icon = Icons.Filled.Dashboard,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -740,7 +845,12 @@ fun SettingsScreen(
                         else -> "Max (24-bit / 192 kHz FLAC)"
                     }
 
-                    val totalAudioRows = if (misc.crossfadeEnabled) 7 else 6
+                    val isIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+                    val totalAudioRows = if (misc.crossfadeEnabled) {
+                        if (isIgnored) 6 else 7
+                    } else {
+                        if (isIgnored) 5 else 6
+                    }
                     SettingsGroup(rowCount = totalAudioRows) { index, position ->
                         when (index) {
                             0 -> SettingsActionCard(
@@ -828,34 +938,24 @@ fun SettingsScreen(
                                     onCheckedChange = viewModel::setDownloadLyrics,
                                     position = position,
                                 )
-                            } else {
-                                val isIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+                            } else if (!isIgnored) {
                                 SettingsActionCard(
                                     icon = Icons.Filled.Bolt,
-                                    iconContainer = if (isIgnored) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
-                                    iconTint = if (isIgnored) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+                                    iconContainer = MaterialTheme.colorScheme.errorContainer,
+                                    iconTint = MaterialTheme.colorScheme.onErrorContainer,
                                     title = stringResource(R.string.settings_battery_title),
-                                    subtitle = if (isIgnored) {
-                                        "Unrestricted \u2022 Protected against Samsung & OEM background killing"
-                                    } else {
-                                        "Restricted \u2022 Tap to exempt from Samsung Device Care / sleeping apps"
-                                    },
+                                    subtitle = "Restricted \u2022 Tap to exempt from Samsung Device Care / sleeping apps",
                                     onClick = { BatteryOptimizationHelper.requestIgnoreBatteryOptimizations(context) },
                                     position = position,
                                 )
                             }
-                            6 -> {
-                                val isIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+                            6 -> if (!isIgnored) {
                                 SettingsActionCard(
                                     icon = Icons.Filled.Bolt,
-                                    iconContainer = if (isIgnored) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
-                                    iconTint = if (isIgnored) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+                                    iconContainer = MaterialTheme.colorScheme.errorContainer,
+                                    iconTint = MaterialTheme.colorScheme.onErrorContainer,
                                     title = stringResource(R.string.settings_battery_title),
-                                    subtitle = if (isIgnored) {
-                                        "Unrestricted \u2022 Protected against Samsung & OEM background killing"
-                                    } else {
-                                        "Restricted \u2022 Tap to exempt from Samsung Device Care / sleeping apps"
-                                    },
+                                    subtitle = "Restricted \u2022 Tap to exempt from Samsung Device Care / sleeping apps",
                                     onClick = { BatteryOptimizationHelper.requestIgnoreBatteryOptimizations(context) },
                                     position = position,
                                 )
@@ -869,20 +969,31 @@ fun SettingsScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_imports))
-                    SettingsGroup(rowCount = 1) { _, position ->
-                        SettingsActionCard(
-                            icon = Icons.Filled.FileDownload,
-                            iconContainer = MaterialTheme.colorScheme.secondaryContainer,
-                            iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
-                            title = stringResource(R.string.settings_import_file),
-                            subtitle = stringResource(R.string.settings_import_file_sub),
-                            onClick = {
-                                runCatching {
-                                    csvPickerLauncher.launch(arrayOf("text/*", "text/csv", "application/csv", "audio/x-mpegurl", "application/x-mpegurl", "application/vnd.apple.mpegurl", "*/*"))
-                                }.onFailure { viewModel.showToast("No file picker is available") }
-                            },
-                            position = position,
-                        )
+                    SettingsGroup(rowCount = 2) { index, position ->
+                        when (index) {
+                            0 -> SettingsActionCard(
+                                icon = Icons.Filled.QueueMusic,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = "Import from Spotify / Apple Music",
+                                subtitle = "Paste a public playlist link",
+                                onClick = onOpenExternalImport,
+                                position = position,
+                            )
+                            else -> SettingsActionCard(
+                                icon = Icons.Filled.FileDownload,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = stringResource(R.string.settings_import_file),
+                                subtitle = stringResource(R.string.settings_import_file_sub),
+                                onClick = {
+                                    runCatching {
+                                        csvPickerLauncher.launch(arrayOf("text/*", "text/csv", "application/csv", "audio/x-mpegurl", "application/x-mpegurl", "application/vnd.apple.mpegurl", "*/*"))
+                                    }.onFailure { viewModel.showToast("No file picker is available") }
+                                },
+                                position = position,
+                            )
+                        }
                     }
                 }
             }
@@ -1202,7 +1313,7 @@ fun SettingsScreen(
             onDismissRequest = { showLanguageDialog = false },
             title = { Text(stringResource(R.string.settings_language_dialog_title)) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
                     AppLanguage.SELECTABLE.forEach { language ->
                         val selected = language == currentLanguage
                         Row(
@@ -1213,17 +1324,9 @@ fun SettingsScreen(
                                     viewModel.setAppLanguage(language)
                                     showLanguageDialog = false
                                 }
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            RadioButton(
-                                selected = selected,
-                                onClick = {
-                                    viewModel.setAppLanguage(language)
-                                    showLanguageDialog = false
-                                },
-                            )
-                            Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     language.nativeDisplayName(),
@@ -1724,6 +1827,73 @@ private fun IconBadge(icon: ImageVector, container: Color, tint: Color, modifier
 }
 
 @Composable
+private fun ThemeModeSelectorCard(
+    currentThemeMode: ThemeMode,
+    onSelectThemeMode: (ThemeMode) -> Unit,
+    position: GroupPosition = GroupPosition.SINGLE,
+) {
+    val shape = groupShape(position)
+    val liquidGlass = LocalLiquidGlass.current
+
+    Card(
+        shape = shape,
+        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .liquidGlassChrome(shape, liquidGlass),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconBadge(
+                    Icons.Filled.BrightnessAuto,
+                    MaterialTheme.colorScheme.primaryContainer,
+                    MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.settings_theme_mode),
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        stringResource(R.string.settings_theme_mode_sub),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            val items = listOf(
+                ConnectedButtonItem(stringResource(R.string.theme_mode_system), Icons.Filled.BrightnessAuto),
+                ConnectedButtonItem(stringResource(R.string.theme_mode_light), Icons.Filled.LightMode),
+                ConnectedButtonItem(stringResource(R.string.theme_mode_dark), Icons.Filled.DarkMode),
+            )
+            val selectedIdx = when (currentThemeMode) {
+                ThemeMode.SYSTEM -> 0
+                ThemeMode.LIGHT -> 1
+                ThemeMode.DARK -> 2
+            }
+            ConnectedButtonGroup(
+                items = items,
+                selectedIndex = selectedIdx,
+                onSelect = { idx ->
+                    val mode = when (idx) {
+                        0 -> ThemeMode.SYSTEM
+                        1 -> ThemeMode.LIGHT
+                        else -> ThemeMode.DARK
+                    }
+                    onSelectThemeMode(mode)
+                },
+            )
+        }
+    }
+}
+
+@Composable
 private fun SettingsToggleCard(
     icon: ImageVector,
     iconContainer: Color,
@@ -1733,6 +1903,7 @@ private fun SettingsToggleCard(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     position: GroupPosition = GroupPosition.SINGLE,
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val scale = rememberPressScale(interactionSource)
@@ -1740,42 +1911,50 @@ private fun SettingsToggleCard(
     val liquidGlass = LocalLiquidGlass.current
 
     Card(
-        onClick = { onCheckedChange(!checked) },
+        onClick = { if (enabled) onCheckedChange(!checked) },
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
-        // Pinned at 0dp: Material3's Card blends an extra primary-tinted
-        // alpha layer on top of containerColor whenever tonalElevation is
-        // above 0dp (surfaceColorAtElevation) — with a Switch already
-        // providing this row's own selected/unselected signal, any such
-        // blend on the row itself would read as a second, redundant layer
-        // behind the label. Same root cause as ModeCard's fix below.
+        enabled = enabled,
+        colors = CardDefaults.cardColors(
+            containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh),
+            disabledContainerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f)),
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         interactionSource = interactionSource,
         modifier = Modifier
             .fillMaxWidth()
-            .scale(scale)
+            .scale(if (enabled) scale else 1f)
             .liquidGlassChrome(shape, liquidGlass),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconBadge(icon, iconContainer, iconTint)
+            IconBadge(
+                icon,
+                if (enabled) iconContainer else iconContainer.copy(alpha = 0.5f),
+                if (enabled) iconTint else iconTint.copy(alpha = 0.5f),
+            )
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                )
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                    maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
             }
             Spacer(Modifier.width(8.dp))
             Switch(
                 checked = checked,
-                onCheckedChange = onCheckedChange,
+                enabled = enabled,
+                onCheckedChange = if (enabled) onCheckedChange else null,
                 thumbContent = if (checked) {
                     {
                         Icon(
@@ -1961,7 +2140,7 @@ private fun SettingsActionCard(
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = titleColor)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
             Icon(
                 Icons.Filled.ChevronRight,
@@ -2052,72 +2231,211 @@ private fun relativeTime(timestampMillis: Long): String {
     }
 }
 
+private const val LAST_FM_CREATE_KEY_URL = "https://www.last.fm/api/account/create"
+
 @Composable
-private fun AccountCard(
-    isSignedIn: Boolean,
+private fun LastFmIntegrationCard(
+    isConnected: Boolean,
     username: String,
-    onLogOut: () -> Unit,
+    connecting: Boolean,
+    awaitingApproval: Boolean,
+    hasApiKey: Boolean,
+    onConnect: () -> Unit,
+    onCancel: () -> Unit,
+    onDisconnect: () -> Unit,
+    onSaveKeys: (String, String) -> Unit,
+    onRemoveKey: () -> Unit,
+    onOpenCreateKeyPage: () -> Unit,
 ) {
-    var showLogoutConfirm by remember { mutableStateOf(false) }
+    var showDisconnectConfirm by remember { mutableStateOf(false) }
+    // No shared key exists, so the form starts open until a key is saved.
+    var showKeyForm by remember(hasApiKey) { mutableStateOf(!hasApiKey) }
+    var keyInput by remember { mutableStateOf("") }
+    var secretInput by remember { mutableStateOf("") }
 
     Card(
         shape = CardOuterShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = if (isConnected) 14.dp else 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Box(
-                Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    if (isSignedIn && username.isNotBlank()) username.take(1).uppercase() else "L",
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleMedium,
-                )
+                if (isConnected) {
+                    IconBadge(
+                        Icons.Filled.CloudSync,
+                        MaterialTheme.colorScheme.primaryContainer,
+                        MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                } else {
+                    Box(
+                        Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "L",
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Last.fm",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        if (isConnected && username.isNotBlank()) username else "Not connected",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                    if (!isConnected) {
+                        Text(
+                            "Optional • Stats use local listening when disconnected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (isConnected) {
+                    Spacer(Modifier.width(8.dp))
+                    FilledTonalIconButton(
+                        onClick = { showDisconnectConfirm = true },
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ),
+                    ) {
+                        Icon(Icons.Filled.Logout, contentDescription = "Disconnect")
+                    }
+                }
             }
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Last.fm Account",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    if (username.isNotBlank()) username else "Not connected",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
+            if (!isConnected) {
+                when {
+                    awaitingApproval || connecting -> {
+                        com.lastwave.app.ui.common.ExpressiveLoadingIndicator(
+                            message = if (connecting) "Connecting to Last.fm…" else "Waiting for approval in the browser…",
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(onClick = onCancel) { Text("Cancel") }
+                    }
+                    else -> {
+                        Button(
+                            onClick = onConnect,
+                            enabled = hasApiKey,
+                            shape = ExpressivePillShape,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Connect Last.fm") }
+                        Text(
+                            if (hasApiKey) "Approve in your browser. You can disconnect anytime — Stats keep working locally."
+                            else "Add your API key below first, then connect.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
-            Spacer(Modifier.width(8.dp))
-            FilledTonalIconButton(
-                onClick = { showLogoutConfirm = true },
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ),
-            ) {
-                Icon(Icons.Filled.Logout, contentDescription = "Log out")
+
+            if (!isConnected) {
+                // ── Bring-your-own-key (required, no shared key): Last.fm
+                //    rate-limits per API key, so each person adds their own key
+                //    here before connecting.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "API key",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            if (hasApiKey) "Your key is saved"
+                            else "Required — get one free, then paste it here",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { showKeyForm = !showKeyForm }) {
+                        Text(if (showKeyForm) "Hide" else if (hasApiKey) "Change" else "Add key")
+                    }
+                }
+                if (showKeyForm) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it.trim() },
+                        label = { Text("API key (32 chars)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = secretInput,
+                        onValueChange = { secretInput = it.trim() },
+                        label = { Text("Shared secret") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = {
+                                onSaveKeys(keyInput, secretInput)
+                                keyInput = ""
+                                secretInput = ""
+                                showKeyForm = false
+                            },
+                            enabled = keyInput.length >= 16 && secretInput.length >= 16,
+                            shape = ExpressivePillShape,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Save key") }
+                        if (hasApiKey) {
+                            OutlinedButton(
+                                onClick = onRemoveKey,
+                                shape = ExpressivePillShape,
+                            ) { Text("Remove") }
+                        }
+                    }
+                    TextButton(onClick = onOpenCreateKeyPage) {
+                        Text("Get a free key at last.fm/api →")
+                    }
+                } else {
+                    TextButton(onClick = onOpenCreateKeyPage) {
+                        Text("How to get a free key →")
+                    }
+                }
+            }
             }
         }
     }
 
-    if (showLogoutConfirm) {
+    if (showDisconnectConfirm) {
         AlertDialog(
-            onDismissRequest = { showLogoutConfirm = false },
-            title = { Text(stringResource(R.string.dialog_logout_title)) },
-            text = { Text(stringResource(R.string.dialog_logout_text)) },
-            confirmButton = { TextButton(onClick = { showLogoutConfirm = false; onLogOut() }) { Text(stringResource(R.string.common_log_out)) } },
-            dismissButton = { TextButton(onClick = { showLogoutConfirm = false }) { Text(stringResource(R.string.common_cancel)) } },
+            onDismissRequest = { showDisconnectConfirm = false },
+            title = { Text("Disconnect Last.fm?") },
+            text = { Text("Global scrobbles pause. Your Stats switch to local listening history — nothing is deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDisconnectConfirm = false
+                    onDisconnect()
+                }) { Text("Disconnect") }
+            },
+            dismissButton = { TextButton(onClick = { showDisconnectConfirm = false }) { Text("Cancel") } },
         )
     }
 }

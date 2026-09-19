@@ -11,16 +11,18 @@
 
 <p align="center">
   <a href="#">
-    <img src="https://img.shields.io/badge/Audio-Hi--Res%20Lossless%20FLAC-00E5FF?style=for-the-badge&logo=flac&logoColor=white&labelColor=012226" alt="Hi-Res Lossless FLAC" />
+    <img src="https://img.shields.io/badge/Client-YouTube%20Music-FF0000?style=for-the-badge&logo=youtubemusic&logoColor=white&labelColor=2d2d2d" alt="YouTube Music Client" />
   </a>
   <a href="#">
     <img src="https://img.shields.io/badge/Version-1.1.0--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 1.1.0-native" />
+    <img src="https://img.shields.io/badge/Scrobbler-Last.fm-D51007?style=for-the-badge&logo=lastdotfm&logoColor=white&labelColor=2d2d2d" alt="Last.fm Scrobbler" />
   </a>
   <a href="#">
     <img src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white&labelColor=2d2d2d" alt="Platform" />
   </a>
 </p>
 
+</p>
 
 </div>
 
@@ -41,20 +43,9 @@
 
 ## <img src="https://api.iconify.design/lucide:sparkles.svg?color=%23C6F100" width="20" height="20" align="center" /> Overview
 
-**LastWave** is a native Android music streaming app engineered for audiophiles and music lovers. It delivers studio-quality **Hi-Res Lossless FLAC (up to 24-bit/192kHz)** and Opus playback, offline downloads with full embedded metadata, kinetic real-time synchronized lyrics, smart algorithmic playlist generation, and automatic scrobbling across all your devices.
+**LastWave** is a modern native Android music client powered by the global YouTube Music catalog, designed for listeners who want intelligent recommendations, kinetic visuals, and seamless music tracking. 
 
-Designed from the ground up around **Material 3 Expressive**, LastWave pairs an ultra-smooth visual experience with uncompromising audio fidelity.
-
----
-
-## <img src="https://api.iconify.design/lucide:headphones.svg?color=%23C6F100" width="20" height="20" align="center" /> Lossless Audio Streaming & Backend
-
-LastWave features a lossless streaming and download engine powered directly by the **[clashflac](https://github.com/ajisth69/clashflac)** backend:
-
-- <img src="https://api.iconify.design/lucide:disc.svg?color=%2300E5FF" width="16" height="16" align="center" /> **Studio Master Quality:** Stream and download bit-perfect FLAC audio up to **24-bit / 192kHz** directly via **[clashflac](https://github.com/ajisth69/clashflac)**.
-- <img src="https://api.iconify.design/lucide:zap.svg?color=%23C6F100" width="16" height="16" align="center" /> **Opus & High-Efficiency Audio:** Seamless dual-engine fallback streaming via YouTube Music Opus for exhaustive global catalog coverage.
-- <img src="https://api.iconify.design/lucide:download.svg?color=%23C6F100" width="16" height="16" align="center" /> **Full-Fidelity Offline Downloads:** One-tap downloads saved directly to your local storage (`Music/LastWave`), fully tagged with high-res cover art, release tags, and synchronized LRCLIB `.lrc` lyrics.
-- <img src="https://api.iconify.design/lucide:sliders.svg?color=%23C6F100" width="16" height="16" align="center" /> **Zero-Gap Playback:** Powered by AndroidX Media3 ExoPlayer with foreground audio playback and lockscreen media session controls.
+Built with **Material 3 Expressive**, LastWave combines effortless ad-free streaming, an AI-powered smart playlist generator, real-time synchronized karaoke lyrics, and a built-in Last.fm scrobbler that watches your playback across your favorite music apps.
 
 ---
 
@@ -62,25 +53,26 @@ LastWave features a lossless streaming and download engine powered directly by t
 
 | Icon | Feature | Highlight |
 |:---:|:---|:---|
-| <img src="https://api.iconify.design/lucide:music.svg?color=%2300E5FF" width="20" height="20" /> | **Lossless Streaming** | True Hi-Res 24-bit FLAC & Opus streaming with lossless bitstream output. |
-| <img src="https://api.iconify.design/lucide:arrow-down-to-line.svg?color=%23C6F100" width="20" height="20" /> | **Offline Downloader** | Download albums, mixes, and individual songs with embedded album art and synced lyrics. |
-| <img src="https://api.iconify.design/lucide:mic.svg?color=%23FFB4A2" width="20" height="20" /> | **Real-Time Synced Lyrics** | Millisecond-accurate animated karaoke lyrics powered by LRCLIB with 8 customizable physics motion styles (Apple Fluid, Karaoke Pulse, Kinetic Slide, etc.). |
-| <img src="https://api.iconify.design/lucide:compass.svg?color=%23C6F100" width="20" height="20" /> | **Smart Discovery Engine** | Tailored recommendation feed built from your taste profile, similar seeds, loved tracks, and live charts. |
-| <img src="https://api.iconify.design/lucide:disc.svg?color=%2300E5FF" width="20" height="20" /> | **Genre DNA & Explorer** | Dynamic breakdown of your favorite genres with instant "Start Mix" and one-tap "Discover More" recommendations. |
-| <img src="https://api.iconify.design/lucide:wand-2.svg?color=%23C6F100" width="20" height="20" /> | **Taste Mixes & Playlists** | Generate unique 30–35 track mood mixes, regenerate fresh variations, manage custom playlists, and sync with YouTube Music. |
-| <img src="https://api.iconify.design/lucide:users.svg?color=%23FFB4A2" width="20" height="20" /> | **Friends & Social Feed** | Browse friends' listening habits, explore their top tracks, and play their taste profiles. |
-| <img src="https://api.iconify.design/lucide:radio.svg?color=%2300E5FF" width="20" height="20" /> | **Integrated Scrobbler** | Automatic background scrobbler watching your active media sessions across any Android music app with zero battery drain. |
-| <img src="https://api.iconify.design/lucide:palette.svg?color=%23C6F100" width="20" height="20" /> | **Material 3 Expressive** | Dynamic wallpaper colors, custom HSL color picker, dynamic album art palette, fluid morphing cards, and tactile haptics. |
+| <img src="https://api.iconify.design/lucide:play-circle.svg?color=%23FF0000" width="20" height="20" /> | **YouTube Music Client** | Stream tracks, albums, artists, and public playlists from YouTube Music with zero ads and background playback. |
+| <img src="https://api.iconify.design/lucide:wand-2.svg?color=%23C6F100" width="20" height="20" /> | **Smart Playlist Generator** | Algorithmic taste mixes and mood radios generated from your listening history, seed artists, loved tracks, and top genres. |
+| <img src="https://api.iconify.design/lucide:radio.svg?color=%23D51007" width="20" height="20" /> | **Universal Last.fm Scrobbler** | Built-in media scrobbler tracking listening activity across YouTube Music, Spotify, Apple Music, and local players with zero battery drain. |
+| <img src="https://api.iconify.design/lucide:mic.svg?color=%23FFB4A2" width="20" height="20" /> | **Real-Time Synced Lyrics** | Millisecond-accurate animated karaoke lyrics powered by LRCLIB with 8 customizable fluid physics motions. |
+| <img src="https://api.iconify.design/lucide:arrow-down-to-line.svg?color=%23C6F100" width="20" height="20" /> | **Offline Downloader** | One-tap downloads saved directly to local storage (`Music/LastWave`), fully tagged with high-res cover art and synchronized `.lrc` lyrics. |
+| <img src="https://api.iconify.design/lucide:compass.svg?color=%2300E5FF" width="20" height="20" /> | **Discovery Feed & Genre DNA** | Personalized recommendation radar with deep genre breakdowns, weekly listening recaps, and instant "Start Mix" radios. |
+| <img src="https://api.iconify.design/lucide:share-2.svg?color=%23C6F100" width="20" height="20" /> | **Cross-Platform Playlist Import** | Instantly import public playlists from Spotify and Apple Music directly into your LastWave library. |
+| <img src="https://api.iconify.design/lucide:users.svg?color=%23FFB4A2" width="20" height="20" /> | **Social Feed & Friends** | Follow friends' listening activity via Last.fm, browse their recent scrobbles, and explore their top tracks. |
+| <img src="https://api.iconify.design/lucide:palette.svg?color=%23C6F100" width="20" height="20" /> | **Material 3 Expressive** | Dynamic wallpaper theming, custom HSL color palette engine, album art color extraction, fluid card animations, and tactile haptics. |
 
 ---
 
 ## <img src="https://api.iconify.design/lucide:cpu.svg?color=%23C6F100" width="20" height="20" align="center" /> Tech Stack & Architecture
 
-- **Language & Framework:** 100% Kotlin + Jetpack Compose (Material 3 Expressive)
-- **Lossless Audio Backend:** **[clashflac](https://github.com/ajisth69/clashflac)** by [Ajisth (ajisth69)](https://github.com/ajisth69)
-- **Audio Engine:** AndroidX Media3 ExoPlayer + MediaSessionService
-- **Lyrics Engine:** [LRCLIB](https://lrclib.net) API
-- **Data & Intelligence:** Last.fm API, Room DB, Jetpack DataStore, Dagger Hilt
+- **Language & UI:** 100% Kotlin + Jetpack Compose (Material 3 Expressive)
+- **Audio Engine:** AndroidX Media3 ExoPlayer with lockscreen media controls & Android Auto integration
+- **Streaming Catalog:** YouTube Music streaming engine with high-efficiency Opus audio
+- **Scrobbling & Tracking:** Last.fm API with native OS media session tracking
+- **Lyrics Engine:** [LRCLIB](https://lrclib.net) millisecond-synchronized lyrics
+- **Architecture:** MVVM + Clean Architecture, Room DB, Jetpack DataStore, Dagger Hilt, Coroutines & Flow
 
 ---
 
@@ -96,7 +88,7 @@ LastWave features a lossless streaming and download engine powered directly by t
 ## <img src="https://api.iconify.design/lucide:terminal.svg?color=%23C6F100" width="20" height="20" align="center" /> Building from Source
 
 ```bash
-git clone https://github.com/duxtami/LastWave-native.git
+git clone https://github.com/Clash-Projects/LastWave-native.git
 cd LastWave-native
 ./gradlew assembleRelease
 ```
@@ -105,12 +97,28 @@ cd LastWave-native
 
 ## <img src="https://api.iconify.design/lucide:message-circle.svg?color=%2324A1DE" width="20" height="20" align="center" /> Community & Support
 
-- <img src="https://api.iconify.design/lucide:send.svg?color=%2324A1DE" width="16" height="16" align="center" /> **Updates & Support:** [Join @clashprojects on Telegram](https://t.me/clashprojects)
-- <img src="https://api.iconify.design/lucide:sparkles.svg?color=%230088cc" width="16" height="16" align="center" /> **More From Us:** [Join @MaterialYouApp on Telegram](https://t.me/MaterialYouApp)
+* <img src="https://api.iconify.design/lucide:send.svg?color=%2324A1DE" width="16" height="16" align="center" /> **Updates & Support:** [Join @clashprojects on Telegram](https://t.me/clashprojects)
+* <img src="https://api.iconify.design/lucide:sparkles.svg?color=%230088cc" width="16" height="16" align="center" /> **More From Us:** [Join @MaterialYouApp on Telegram](https://t.me/MaterialYouApp)
+* <img src="https://api.iconify.design/lucide:message-square.svg?color=%235865F2" width="16" height="16" align="center" /> **Discord Community:** [Join Discord](https://discord.gg/DmyM2p2fMe)
+* <img src="https://api.iconify.design/lucide:globe.svg?color=%2324A1DE" width="16" height="16" align="center" /> **LastWave Website:** [visit site now](https://lastwave.pages.dev)
+
+---
+
+## <img src="https://api.iconify.design/lucide:shield-alert.svg?color=%23FFB4A2" width="20" height="20" align="center" /> Disclaimer
+
+> [!NOTE]
+> **Educational & Research Notice**
+>
+> LastWave is an open-source, non-commercial application developed strictly for research and educational purposes to demonstrate modern Android application architecture with Jetpack Compose and AndroidX Media3.
+>
+> **No Affiliation & Content Policy**
+> - LastWave is an independent project and is **not affiliated with, endorsed, or sponsored by Google LLC, YouTube, YouTube Music, Spotify, Apple Inc., Last.fm, or any music service**.
+> - LastWave **does not host, stream from private servers, or distribute any copyrighted media**. All content and metadata are accessed directly from public endpoints in accordance with their respective terms. All trademarks belong to their respective owners.
 
 ---
 
 <div align="center">
-  <p><b>LastWave</b> is built by <a href="https://github.com/duxtami">Duxtami</a> & <a href="https://github.com/ajisth69">Ajisth</a>.</p>
+  <p><b>LastWave</b> is built with ❤️ by <a href="https://github.com/duxtami">Duxtami</a> & <a href="https://github.com/ajisth69">Ajisth</a>.</p>
 </div>
+
 [![GitGem](https://gitgem.org/api/badge/github/Clash-Projects/LastWave-Native.svg)](https://gitgem.org/github/Clash-Projects/LastWave-Native)
