@@ -107,6 +107,7 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -181,6 +182,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -223,11 +225,12 @@ import com.lastwave.app.ui.theme.LocalLiquidGlassBackdrop
 import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
 import com.lastwave.app.ui.theme.LiquidGlassPreset
 import com.lastwave.app.ui.theme.BackdropBlur
-import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.hakim.liquify.Backdrop
+import com.hakim.liquify.backdrops.rememberLayerBackdrop
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 enum class FullPlayerTab {
     NOW_PLAYING,
@@ -262,6 +265,8 @@ class PlayerViewModel @Inject constructor(
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val likedSongsManager: com.lastwave.app.data.playlist.LikedSongsManager,
     private val scrobbleRepository: com.lastwave.app.data.repository.ScrobbleRepository,
+    private val downloadManager: com.lastwave.app.data.download.TrackDownloadManager,
+    private val routeNavigator: com.lastwave.app.ui.navigation.AppRouteNavigator,
 ) : ViewModel() {
     val navEvents = navigator.events
     val state = player.state
@@ -273,6 +278,13 @@ class PlayerViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, player.state.value.copy(positionMs = 0L, bufferedPositionMs = 0L))
     val settings: StateFlow<com.lastwave.app.data.local.MiscSettings> = settingsPreferences.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.lastwave.app.data.local.MiscSettings())
+    val activeDownloads = downloadManager.downloads
+        .map { map -> map.values.filter { !it.isFinished && it.error == null } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun navigateToDownloads() {
+        routeNavigator.navigateTo(com.lastwave.app.ui.navigation.Screen.Downloads.route)
+    }
     private val _customPlaylists = MutableStateFlow<List<SavedPlaylist>>(emptyList())
     val customPlaylists = _customPlaylists.asStateFlow()
     private var customPlaylistsLoaded = false
@@ -291,6 +303,12 @@ class PlayerViewModel @Inject constructor(
 
     private var currentTrackLyricsKey: String? = null
     private var lyricsJob: Job? = null
+
+    private companion object {
+        /** Spinner only appears when loading actually takes time; cache
+         *  hits resolve well inside this window with no flash. */
+        const val LOADING_SPINNER_DELAY_MS = 250L
+    }
 
     init {
         viewModelScope.launch {
@@ -345,30 +363,40 @@ class PlayerViewModel @Inject constructor(
     fun loadLyrics(track: PlayableTrack, forceRefresh: Boolean = false) {
         lyricsJob?.cancel()
         lyricsJob = viewModelScope.launch {
-            _lyricsState.value = LyricsUiState.Loading
-            val durationSeconds = if (player.state.value.durationMs > 0) {
-                (player.state.value.durationMs / 1000).toInt()
-            } else null
-
-            val result = try {
-                lyricsRepository.getLyrics(
-                    track.title, track.artist, track.album, durationSeconds, forceRefresh,
-                    wordByWord = settingsPreferences.settings.first().wordByWordLyrics,
-                    onPartialResult = { partial ->
-                        withContext(Dispatchers.Main.immediate) {
-                            coroutineContext.ensureActive()
-                            publishLyrics(partial)
-                        }
-                    },
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                LyricsResult.Error(error.message ?: "Couldn't load lyrics")
+            // Hold the previous track's lyrics instead of flashing the
+            // spinner on every change: cache hits resolve in milliseconds,
+            // so the indicator only appears when loading actually takes time.
+            val loadingIndicator = launch {
+                delay(LOADING_SPINNER_DELAY_MS)
+                _lyricsState.value = LyricsUiState.Loading
             }
-            coroutineContext.ensureActive()
-            if (result is LyricsResult.Success || _lyricsState.value !is LyricsUiState.Success) {
-                publishLyrics(result)
+            try {
+                val durationSeconds = if (player.state.value.durationMs > 0) {
+                    (player.state.value.durationMs / 1000).toInt()
+                } else null
+
+                val result = try {
+                    lyricsRepository.getLyrics(
+                        track.title, track.artist, track.album, durationSeconds, forceRefresh,
+                        wordByWord = settingsPreferences.settings.first().wordByWordLyrics,
+                        onPartialResult = { partial ->
+                            withContext(Dispatchers.Main.immediate) {
+                                coroutineContext.ensureActive()
+                                publishLyrics(partial)
+                            }
+                        },
+                    )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    LyricsResult.Error(error.message ?: "Couldn't load lyrics")
+                }
+                coroutineContext.ensureActive()
+                if (result is LyricsResult.Success || _lyricsState.value !is LyricsUiState.Success) {
+                    publishLyrics(result)
+                }
+            } finally {
+                loadingIndicator.cancel()
             }
         }
     }
@@ -494,6 +522,7 @@ fun PlayerHost(
     content: @Composable () -> Unit,
 ) {
     val state by viewModel.chromeState.collectAsStateWithLifecycle()
+    val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
     var expanded by rememberSaveable { mutableStateOf(false) }
     var currentTab by rememberSaveable { mutableStateOf(FullPlayerTab.NOW_PLAYING) }
     var playlistTrack by remember { mutableStateOf<PlayableTrack?>(null) }
@@ -559,6 +588,14 @@ fun PlayerHost(
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
+            if (activeDownloads.isNotEmpty() && !expanded) {
+                val latestProgress = activeDownloads.firstOrNull()?.progressPercent ?: 0
+                com.lastwave.app.ui.download.DraggableDownloadOverlay(
+                    activeDownloadsCount = activeDownloads.size,
+                    latestProgressPercent = latestProgress,
+                    onOpenDownloads = { viewModel.navigateToDownloads() },
+                )
+            }
             AnimatedVisibility(
                 visible = expanded && state.current != null,
                 enter = slideInVertically(
@@ -571,14 +608,8 @@ fun PlayerHost(
                 ) + fadeOut(tween(150)),
             ) {
                 PredictiveBackScreen(
-                    enabled = expanded && state.current != null,
-                    onBack = {
-                        if (currentTab != FullPlayerTab.NOW_PLAYING) {
-                            currentTab = FullPlayerTab.NOW_PLAYING
-                        } else {
-                            expanded = false
-                        }
-                    },
+                    enabled = expanded && state.current != null && currentTab == FullPlayerTab.NOW_PLAYING,
+                    onBack = { expanded = false },
                 ) {
                     ExpandedPlayer(
                         viewModel = viewModel,
@@ -1412,7 +1443,6 @@ private fun FullPlayer(
 ) {
     val track = state.current ?: return
     var lyricsFullscreen by remember(currentTab) { mutableStateOf(false) }
-    BackHandler(enabled = lyricsFullscreen) { lyricsFullscreen = false }
     val view = LocalView.current
     DisposableEffect(view, lyricsFullscreen) {
         val fullscreenActive = lyricsFullscreen
@@ -1547,8 +1577,17 @@ private fun FullPlayer(
             val bgMaxDimension = maxOf(bgWidth, bgHeight, 1f)
 
             Box(Modifier.matchParentSize().liquidGlassSource(playerBackdrop)) {
-            // Apple Music: Full-bleed scaled & deeply blurred artwork
-            BackdropBlur(radius = 36.dp, modifier = Modifier.fillMaxSize()) {
+            // Apple Music: Full-bleed scaled & deeply blurred artwork.
+            // Dark veil in BOTH light and dark mode: the full player sits on
+            // a dark scrim (see header comment below), so lyrics/controls use
+            // the white overlay palette. A surface veil turns light mode into
+            // near-white wash (white-on-white lyrics + dead cover tint).
+            BackdropBlur(
+                radius = 36.dp,
+                modifier = Modifier.fillMaxSize(),
+                veil = Color.Black,
+                veilAlpha = 0.52f,
+            ) {
                 PlayerArtwork(
                     track = track,
                     modifier = Modifier
@@ -1556,7 +1595,7 @@ private fun FullPlayer(
                         .graphicsLayer {
                             scaleX = 1.35f
                             scaleY = 1.35f
-                            alpha = 0.72f
+                            alpha = 0.9f
                         },
                     corner = 0.dp,
                     decodeSizePx = 200,
@@ -1659,6 +1698,9 @@ private fun FullPlayer(
                         .padding(horizontal = 20.dp)
                         .playerVerticalSwipe(enabled = currentTab != FullPlayerTab.NOW_PLAYING),
                 ) {
+                    // FullPlayer sits on a dark blurred-artwork scrim in both light and
+                    // dark mode, so foreground must use the white overlay palette —
+                    // never MaterialTheme onSurface (near-black in light mode).
                     IconButton(
                         onClick = {
                             if (currentTab != FullPlayerTab.NOW_PLAYING) {
@@ -1673,14 +1715,14 @@ private fun FullPlayer(
                             .clip(CircleShape)
                             .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
                             ),
                     ) {
                         Icon(
                             if (currentTab != FullPlayerTab.NOW_PLAYING) Icons.Filled.ArrowBack else Icons.Filled.ExpandMore,
                             if (currentTab != FullPlayerTab.NOW_PLAYING) "Back to player" else "Minimize player",
                             modifier = Modifier.size(26.dp),
-                            tint = MaterialTheme.colorScheme.onSurface,
+                            tint = Color.White.copy(alpha = 0.94f),
                         )
                     }
                     Column(
@@ -1694,7 +1736,7 @@ private fun FullPlayer(
                                 FullPlayerTab.QUEUE -> "PLAYING QUEUE"
                             },
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = Color.White.copy(alpha = 0.95f),
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 0.9.sp,
                         )
@@ -1705,7 +1747,7 @@ private fun FullPlayer(
                                 state.sourceLabel.takeIf { it.isNotBlank() } ?: "LastWave"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.92f),
+                            color = Color.White.copy(alpha = 0.70f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1718,14 +1760,14 @@ private fun FullPlayer(
                             .clip(CircleShape)
                             .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
                             .background(
-                                liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
                             ),
                     ) {
                         Icon(
                             Icons.Filled.MoreVert,
                             "Song options",
                             modifier = Modifier.size(22.dp),
-                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.90f),
+                            tint = Color.White.copy(alpha = 0.94f),
                         )
                     }
                 }
@@ -1752,47 +1794,65 @@ private fun FullPlayer(
                 ) { tab ->
                     when (tab) {
                         FullPlayerTab.LYRICS -> {
-                            if (lyricsUiVersion == LyricsUiVersion.MODERN) {
-                                ModernLyricsPanel(
-                                    state = state,
-                                    player = player,
-                                    lyricsState = lyricsState,
-                                    progressState = progressState,
-                                    wavySeekbarEnabled = wavySeekbarEnabled,
-                                    onRetry = onRetryLyrics,
-                                    onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
-                                    isFullscreen = lyricsFullscreen,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .adaptiveContentWidth(maxWidth = 720.dp),
-                                )
-                            } else {
-                                LyricsPanel(
-                                    state = state,
-                                    progressState = progressState,
-                                    player = player,
-                                    lyricsState = lyricsState,
-                                    lyricsAnimation = lyricsAnimation,
-                                    wavySeekbarEnabled = wavySeekbarEnabled,
-                                    onRetry = onRetryLyrics,
-                                    onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
-                                    isFullscreen = lyricsFullscreen,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .adaptiveContentWidth(maxWidth = 720.dp),
-                                )
+                            PredictiveBackScreen(
+                                enabled = currentTab == FullPlayerTab.LYRICS,
+                                backgroundColor = Color.Transparent,
+                                onBack = {
+                                    if (lyricsFullscreen) {
+                                        lyricsFullscreen = false
+                                    } else {
+                                        onTabChange(FullPlayerTab.NOW_PLAYING)
+                                    }
+                                },
+                            ) {
+                                if (lyricsUiVersion == LyricsUiVersion.MODERN) {
+                                    ModernLyricsPanel(
+                                        state = state,
+                                        player = player,
+                                        lyricsState = lyricsState,
+                                        progressState = progressState,
+                                        wavySeekbarEnabled = wavySeekbarEnabled,
+                                        onRetry = onRetryLyrics,
+                                        onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
+                                        isFullscreen = lyricsFullscreen,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .adaptiveContentWidth(maxWidth = 720.dp),
+                                    )
+                                } else {
+                                    LyricsPanel(
+                                        state = state,
+                                        progressState = progressState,
+                                        player = player,
+                                        lyricsState = lyricsState,
+                                        lyricsAnimation = lyricsAnimation,
+                                        wavySeekbarEnabled = wavySeekbarEnabled,
+                                        onRetry = onRetryLyrics,
+                                        onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
+                                        isFullscreen = lyricsFullscreen,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .adaptiveContentWidth(maxWidth = 720.dp),
+                                    )
+                                }
                             }
                         }
 
                         FullPlayerTab.QUEUE -> {
-                            QueuePanel(
-                                state,
-                                player,
-                                Modifier
-                                    .fillMaxSize()
-                                    .adaptiveContentWidth(maxWidth = 720.dp)
-                                    .padding(horizontal = 20.dp),
-                            )
+                            PredictiveBackScreen(
+                                enabled = currentTab == FullPlayerTab.QUEUE,
+                                backgroundColor = Color.Transparent,
+                                onBack = { onTabChange(FullPlayerTab.NOW_PLAYING) },
+                            ) {
+                                QueuePanel(
+                                    state,
+                                    player,
+                                    Modifier
+                                        .fillMaxSize()
+                                        .adaptiveContentWidth(maxWidth = 720.dp)
+                                        .padding(horizontal = 20.dp),
+                                )
+                            }
                         }
 
                         FullPlayerTab.NOW_PLAYING -> {
@@ -2073,7 +2133,7 @@ private fun FullPlayer(
                                                     letterSpacing = (-0.35).sp,
                                                     fontWeight = FontWeight.ExtraBold,
                                                 ),
-                                                color = MaterialTheme.colorScheme.onSurface,
+                                                color = Color.White,
                                                 maxLines = 1,
                                                 modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
                                             )
@@ -2092,7 +2152,7 @@ private fun FullPlayer(
                                                             fontSize = 17.sp,
                                                             fontWeight = FontWeight.Medium,
                                                         ),
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.94f),
+                                                        color = Color.White.copy(alpha = 0.72f),
                                                         modifier = Modifier
                                                             .clickable(
                                                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
@@ -2106,7 +2166,7 @@ private fun FullPlayer(
                                                                 fontSize = 17.sp,
                                                                 fontWeight = FontWeight.Normal,
                                                             ),
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.60f),
+                                                            color = Color.White.copy(alpha = 0.50f),
                                                         )
                                                     }
                                                 }
@@ -2132,14 +2192,14 @@ private fun FullPlayer(
                                                 interactionSource = likeInteraction,
                                                 shape = CircleShape,
                                                 color = liquidGlassContainerColor(if (isLiked) {
-                                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                                                    Color.White.copy(alpha = 0.92f)
                                                 } else {
-                                                    MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)
+                                                    Color.White.copy(alpha = 0.14f)
                                                 }),
                                                 contentColor = if (isLiked) {
-                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                    Color(0xFFE91E63)
                                                 } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                    Color.White.copy(alpha = 0.85f)
                                                 },
                                                 tonalElevation = 0.dp,
                                                 shadowElevation = 0.dp,
@@ -2170,8 +2230,8 @@ private fun FullPlayer(
                                                 onClick = { onTabChange(FullPlayerTab.LYRICS) },
                                                 interactionSource = lyricsInteraction,
                                                 shape = CircleShape,
-                                                color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
-                                                contentColor = MaterialTheme.colorScheme.primary,
+                                                color = liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                                                contentColor = Color.White.copy(alpha = 0.90f),
                                                 tonalElevation = 0.dp,
                                                 shadowElevation = 0.dp,
                                                 modifier = Modifier
@@ -2198,13 +2258,16 @@ private fun FullPlayer(
                                         trackKey = track.videoId ?: "${track.artist}|${track.title}",
                                         wavyEnabled = wavySeekbarEnabled,
                                         onSeek = player::seekTo,
-                                        isTranslucent = false,
+                                        // Background is always a dark scrim: use the white
+                                        // overlay palette so time labels + waves stay
+                                        // readable in light mode too.
+                                        isTranslucent = true,
                                     )
                                     Spacer(Modifier.height(14.dp))
-                                    MainControls(state, player, isTranslucent = false)
+                                    MainControls(state, player, isTranslucent = true)
                                     }
                                     Spacer(Modifier.height(24.dp))
-                                    PlayerUtilityControls(state, player, isTranslucent = false)
+                                    PlayerUtilityControls(state, player, isTranslucent = true)
                                 }
                         }
                     }
@@ -2785,6 +2848,26 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
             dragOffsetY = 0f
         }
     }
+    // Follow the now-playing song in long queues: auto-scroll on every track
+    // change (and on first open), unless the user is dragging or has manually
+    // scrolled within the last few seconds. The eye button still jumps on demand.
+    var userScrollHoldUntil by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) userScrollHoldUntil = System.currentTimeMillis() + 3_000L
+    }
+    LaunchedEffect(state.currentIndex, state.queue.size) {
+        if (draggingIndex != -1 || state.queue.isEmpty()) return@LaunchedEffect
+        if (System.currentTimeMillis() < userScrollHoldUntil) return@LaunchedEffect
+        val target = state.currentIndex.coerceIn(0, state.queue.size - 1)
+        runCatching { listState.animateScrollToItem(target) }
+    }
+    // True upcoming play order (shuffle/repeat aware). Under shuffle the list
+    // below stays in playlist order, so without this strip you can never tell
+    // what plays next — and Play-next adds look "lost".
+    val shuffleUpcoming = remember(state.queue, state.currentIndex, state.shuffleEnabled, state.repeatMode) {
+        if (state.shuffleEnabled) runCatching { player.peekUpcomingIndices(3) }.getOrDefault(emptyList())
+        else emptyList()
+    }.filter { it in state.queue.indices && it != state.currentIndex }
 
     Column(modifier) {
         // Old-HiFi analog VU above the List, fixed (sticky) while the queue scrolls.
@@ -2799,7 +2882,12 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("Up next", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Up next",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
                 Text(
                     if (state.isEndlessQueue) {
                         "Unlimited songs · ${state.currentIndex.coerceAtLeast(0) + 1} playing"
@@ -2807,26 +2895,94 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         "${state.queue.size} songs · ${state.currentIndex.coerceAtLeast(0) + 1} playing"
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.70f),
                 )
                 if (state.queue.size > 1) {
                     Text(
                         stringResource(com.lastwave.app.R.string.queue_rearrange_hint),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        color = Color.White.copy(alpha = 0.55f),
                     )
                 }
             }
             IconButton(
-                onClick = player::clearUpcoming,
-                enabled = state.currentIndex >= 0 && state.currentIndex + 1 < state.queue.size,
+                onClick = {
+                    userScrollHoldUntil = 0L
+                    scope.launch { listState.animateScrollToItem(state.currentIndex.coerceAtLeast(0)) }
+                },
+                enabled = state.currentIndex >= 0 && state.currentIndex < state.queue.size,
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                    .background(Color.White.copy(alpha = 0.14f)),
             ) {
-                Icon(Icons.Filled.ClearAll, "Clear upcoming songs")
+                Icon(
+                    Icons.Filled.Visibility,
+                    "Scroll to current song",
+                    tint = Color.White.copy(alpha = 0.90f),
+                )
             }
+
+        }
+        if (shuffleUpcoming.isNotEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    "Up next in shuffle order",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.60f),
+                    fontWeight = FontWeight.Bold,
+                )
+                shuffleUpcoming.forEachIndexed { order, queueIndex ->
+                    val item = state.queue[queueIndex]
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { player.seekToQueueItem(queueIndex) }
+                            .padding(horizontal = 4.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${order + 1}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(20.dp),
+                        )
+                        Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                            Text(
+                                item.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.92f),
+                            )
+                            Text(
+                                item.artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.60f),
+                            )
+                        }
+                        Text(
+                            "#${queueIndex + 1}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.40f),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
         }
         LazyColumn(
             state = listState,
@@ -2837,6 +2993,29 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                 val isCurrent = index == state.currentIndex
                 val isDragging = index == draggingIndex
                 val stableKey = queueKeys.getOrNull(index) ?: index.toString()
+                val dismissState = androidx.compose.material3.rememberSwipeToDismissBoxState(
+                    confirmValueChange = { dismissValue ->
+                        if (dismissValue != androidx.compose.material3.SwipeToDismissBoxValue.Settled) {
+                            player.removeQueueItem(index)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                )
+                androidx.compose.material3.SwipeToDismissBox(
+                    state = dismissState,
+                    modifier = Modifier.animateItem(),
+                    backgroundContent = {
+                        val alignment = if (dismissState.dismissDirection == androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart else Alignment.CenterEnd
+                        Box(
+                            Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.errorContainer).padding(horizontal = 24.dp),
+                            contentAlignment = alignment
+                        ) {
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete", tint = MaterialTheme.colorScheme.onErrorContainer)
+                        }
+                    },
+                    content = {
                 LiquidGlassSurface(
                     glassModifier = Modifier.liquidGlassChrome(RoundedCornerShape(20.dp), LocalLiquidGlass.current),
                     onClick = { player.seekToQueueItem(index) },
@@ -2848,7 +3027,6 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                     contentColor = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer
                     else MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
-                        .animateItem()
                         .zIndex(if (isDragging) 1f else 0f)
                         .graphicsLayer {
                             translationY = if (isDragging) dragOffsetY else 0f
@@ -2863,6 +3041,15 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         Modifier.fillMaxWidth().padding(9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Text(
+                            "${index + 1}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isCurrent) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(30.dp),
+                        )
                         PlayerArtwork(item, Modifier.size(50.dp), 13.dp)
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                             Text(
@@ -2958,21 +3145,10 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                     )
                                 },
                         )
-                        IconButton(
-                            onClick = { player.removeQueueItem(index) },
-                            modifier = Modifier
-                                .padding(start = 4.dp)
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(
-                                    if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.08f)
-                                    else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                ),
-                        ) {
-                            Icon(Icons.Filled.DeleteOutline, "Remove from queue", modifier = Modifier.size(20.dp))
-                        }
                     }
                 }
+                }
+                )
             }
             item { Spacer(Modifier.height(12.dp)) }
         }
@@ -3004,17 +3180,21 @@ internal fun formatTime(ms: Long): String {
 }
 
 private fun qualityLabel(state: MusicPlayerState): String = when {
-    // Lossless with known bit depth / sampling rate → show precise format
+    // Dolby Atmos (Tidal spatial) → badge, never kbps/resolution.
+    state.audioCodec?.equals("DOLBY ATMOS", ignoreCase = true) == true ||
+        state.audioCodec?.equals("ATMOS", ignoreCase = true) == true -> "DOLBY ATMOS"
+    // Lossless with known bit depth / sampling rate → resolution, never kbps.
     state.isLossless && state.bitDepth != null && state.samplingRateKHz != null -> {
-        val rate = if (state.samplingRateKHz % 1.0 == 0.0) state.samplingRateKHz.toInt().toString()
-        else state.samplingRateKHz.toString()
-        "FLAC ${state.bitDepth}/$rate"
+        val rounded = (state.samplingRateKHz * 10).roundToInt() / 10.0
+        val rate = if (rounded % 1.0 == 0.0) rounded.toInt().toString() else rounded.toString()
+        "${state.bitDepth}-bit / $rate kHz"
     }
-    state.isLossless && state.audioCodec == "MP3 320k" -> "MP3 320k"
+    state.isLossless && state.audioCodec == "MP3 320k" -> "MP3 320 kbps"
+    // Lossless without measured depth/rate → badge text, never raw kbps.
     state.isLossless -> state.audioCodec ?: "LOSSLESS"
-    // YouTube with known codec + bitrate → e.g. "OPUS 160k" or "AAC 256k"
-    state.audioCodec != null && state.bitrateKbps != null -> "${state.audioCodec} ${state.bitrateKbps}k"
-    state.audioCodec != null -> state.audioCodec
+    // YouTube lossy → e.g. "OPUS 138 kbps" or "AAC 131 kbps".
+    state.audioCodec != null && state.bitrateKbps != null -> "${state.audioCodec.uppercase()} ${state.bitrateKbps} kbps"
+    state.audioCodec != null -> state.audioCodec.uppercase()
     state.bitrateKbps != null -> "${state.bitrateKbps} kbps"
     else -> "AUDIO"
 }

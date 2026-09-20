@@ -68,7 +68,7 @@ import com.lastwave.app.ui.theme.liquidGlassSource
 import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import com.lastwave.app.ui.theme.LiquidGlassPreset
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.hakim.liquify.backdrops.rememberLayerBackdrop
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
@@ -483,7 +483,7 @@ fun AlbumDetailScreen(
                                 ) {
                                     ArtworkImage(
                                         name = track.title,
-                                        artist = track.artist.ifBlank { data.artist },
+                                        artist = track.artist.takeIf { !com.lastwave.app.util.ArtistHelper.isPlayCountOrStat(it) && it.isNotBlank() } ?: data.artist,
                                         embeddedUrl = track.artworkUrl ?: data.artworkUrl,
                                         fallbackIcon = Icons.Filled.Album,
                                         modifier = Modifier.fillMaxSize(),
@@ -511,7 +511,10 @@ fun AlbumDetailScreen(
                                     )
                                     Spacer(Modifier.height(2.dp))
                                     Text(
-                                        text = if (track.artist.isNotBlank() && !track.artist.equals(data.artist, ignoreCase = true)) {
+                                        text = if (track.artist.isNotBlank() &&
+                                            !com.lastwave.app.util.ArtistHelper.isPlayCountOrStat(track.artist) &&
+                                            !track.artist.equals(data.artist, ignoreCase = true)
+                                        ) {
                                             "${track.artist} \u2022 Track ${index + 1}"
                                         } else {
                                             "Track ${index + 1}"
@@ -675,10 +678,12 @@ fun AlbumDetailScreen(
 
     // Context Menu Sheet for Tracks
     selectedTrackMenu?.let { track ->
+        val safeArtist = track.artist.takeIf { !com.lastwave.app.util.ArtistHelper.isPlayCountOrStat(it) && it.isNotBlank() } ?: (uiState as? AlbumUiState.Success)?.data?.artist ?: ""
+        val safeTrack = if (track.artist != safeArtist && safeArtist.isNotBlank()) track.copy(artist = safeArtist) else track
         TrackContextMenuSheet(
-            target = TrackMenuTarget.Track(track.title, track.artist, ""),
+            target = TrackMenuTarget.Track(safeTrack.title, safeTrack.artist, ""),
             capabilities = TrackMenuCapabilities(showCopyActions = true, showDeleteScrobble = false),
-            playableTrack = track,
+            playableTrack = safeTrack,
             playbackSourceLabel = albumTitle,
             onDismiss = { selectedTrackMenu = null },
         )

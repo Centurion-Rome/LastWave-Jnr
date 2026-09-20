@@ -210,6 +210,8 @@ private data class RowsKey(
     val topTracksOverall: List<HomeTrack>,
     val topTracks7Days: List<HomeTrack>,
     val topTracks30Days: List<HomeTrack>,
+    val topArtists: List<com.lastwave.app.data.repository.HomeArtistItem>,
+    val topAlbums: List<com.lastwave.app.data.repository.HomeAlbum>,
 )
 
 
@@ -304,6 +306,8 @@ class HomeViewModel @Inject constructor(
                         topTracksOverall = it.topTracksOverall,
                         topTracks7Days = it.topTracks7Days,
                         topTracks30Days = it.topTracks30Days,
+                        topArtists = it.topArtists,
+                        topAlbums = it.topAlbums,
                     )
                 }
                 .distinctUntilChanged()
@@ -316,6 +320,8 @@ class HomeViewModel @Inject constructor(
                             topTracksOverall = key.topTracksOverall,
                             topTracks7Days = key.topTracks7Days,
                             topTracks30Days = key.topTracks30Days,
+                            topArtists = key.topArtists,
+                            topAlbums = key.topAlbums,
                         ).visibleRows()
                     }
                     _rows.value = computed
@@ -342,10 +348,11 @@ class HomeViewModel @Inject constructor(
     ): Pair<HomeTrack?, List<HomeTrack>> {
         val topCountByKey = topTracks.associate { "${it.name.lowercase()}|${it.artist.lowercase()}" to it.playCount }
         val recentAsHome = recent.map { t ->
-            val key = "${t.name.lowercase()}|${t.artist.displayName.lowercase()}"
+            val safeArtist = t.artist.displayName.takeIf { !com.lastwave.app.util.ArtistHelper.isPlayCountOrStat(it) } ?: ""
+            val key = "${t.name.lowercase()}|${safeArtist.lowercase()}"
             HomeTrack(
                 name = t.name,
-                artist = t.artist.displayName,
+                artist = safeArtist,
                 artworkUrl = t.artworkUrl,
                 timestampMillis = t.date?.uts?.toLongOrNull()?.times(1000),
                 playCount = topCountByKey[key] ?: 0,
@@ -359,12 +366,13 @@ class HomeViewModel @Inject constructor(
             // timestamp on every 12s poll changed the data-class identity and
             // forced every downstream remember/derive on Home to recompute.
             val previous = previousNowPlaying
+            val safeNpArtist = np.artist.displayName.takeIf { !com.lastwave.app.util.ArtistHelper.isPlayCountOrStat(it) } ?: ""
             val sameTrackStillPlaying = previous != null && previous.isNowPlaying &&
                 previous.name.equals(np.name, ignoreCase = true) &&
-                previous.artist.equals(np.artist.displayName, ignoreCase = true)
+                previous.artist.equals(safeNpArtist, ignoreCase = true)
             HomeTrack(
                 name = np.name,
-                artist = np.artist.displayName,
+                artist = safeNpArtist,
                 artworkUrl = np.artworkUrl,
                 timestampMillis = if (sameTrackStillPlaying && previous != null) previous.timestampMillis else System.currentTimeMillis(),
                 playCount = 0,

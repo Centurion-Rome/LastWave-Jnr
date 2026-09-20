@@ -5,9 +5,11 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -17,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -65,6 +68,7 @@ fun PredictiveBackScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    backgroundColor: Color = MaterialTheme.colorScheme.background,
     content: @Composable () -> Unit,
 ) {
     val progress = remember { Animatable(0f) }
@@ -121,22 +125,28 @@ fun PredictiveBackScreen(
     Box(
         modifier
             .fillMaxSize()
-            .onGloballyPositioned { coords -> containerHeightPx = coords.size.height.toFloat() }
-            .graphicsLayer {
-                val scale = 1f - 0.12f * p
-                scaleX = scale
-                scaleY = scale
-                transformOrigin = TransformOrigin(pivotX, touchYFraction)
-                translationX = edgeSign * 28.dp.toPx() * p
-                alpha = 1f - 0.25f * p
-                shape = RoundedCornerShape(lerp(0.dp, 32.dp, p))
-                // Clipping a full-screen LazyColumn at rest forces extra GPU
-                // work on every frame. It is only visually needed while a
-                // predictive-back gesture has actually rounded the corners.
-                clip = p > 0f
-                shadowElevation = if (p > 0f) 24f else 0f
-            },
+            .then(if (backgroundColor != Color.Transparent) Modifier.background(backgroundColor) else Modifier)
+            .onGloballyPositioned { coords -> containerHeightPx = coords.size.height.toFloat() },
     ) {
-        content()
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val scale = 1f - 0.12f * p
+                    scaleX = scale
+                    scaleY = scale
+                    transformOrigin = TransformOrigin(pivotX, touchYFraction)
+                    translationX = edgeSign * 28.dp.toPx() * p
+                    alpha = 1f - 0.25f * p
+                    shape = RoundedCornerShape(lerp(0.dp, 32.dp, p))
+                    // Clipping a full-screen LazyColumn at rest forces extra GPU
+                    // work on every frame. It is only visually needed while a
+                    // predictive-back gesture has actually rounded the corners.
+                    clip = p > 0f
+                    shadowElevation = if (p > 0f) 24f else 0f
+                },
+        ) {
+            content()
+        }
     }
 }

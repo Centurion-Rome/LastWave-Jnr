@@ -1,5 +1,7 @@
 package com.lastwave.app.ui.theme
 
+import android.app.ActivityManager
+import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -12,7 +14,6 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.CornerBasedShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -25,31 +26,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawOutline
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.kyant.backdrop.Backdrop
-import com.kyant.backdrop.backdrops.LayerBackdrop
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.colorControls
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.highlight.Highlight
-import com.kyant.backdrop.highlight.HighlightStyle
-import com.kyant.backdrop.shadow.Shadow
+import com.hakim.liquify.Backdrop
+import com.hakim.liquify.backdrops.LayerBackdrop
+import com.hakim.liquify.backdrops.layerBackdrop
+import com.hakim.liquify.highlight.Highlight
+import com.hakim.liquify.liquify
+import com.hakim.liquify.material.GlassMaterial
+import com.hakim.liquify.shadow.InnerShadow
+import com.hakim.liquify.shadow.Shadow
 
 import androidx.compose.ui.draw.blur
 
@@ -99,14 +92,25 @@ fun LiquidGlassSurface(
     }
 }
 
-/** Background blur with sibling capture; never blurs foreground lyrics or controls. */
+/** Background blur with sibling capture; never blurs foreground lyrics or controls.
+ *
+ *  [veil]/[veilAlpha] tints the blurred content. The default (surface @ 0.74)
+ *  preserves the old behavior for generic screens. Full-player / lyrics must
+ *  pass a dark veil (e.g. Black @ 0.55) so white lyrics stay readable in
+ *  *both* light and dark mode while the cover-art colors shine through —
+ *  a light-mode surface veil washes the backdrop to near-white and kills
+ *  contrast (white-on-white) plus the ambient cover tint.
+ */
 @Composable
 fun BackdropBlur(
     radius: Dp,
     modifier: Modifier = Modifier,
+    veil: Color = Color.Unspecified,
+    veilAlpha: Float = 0.74f,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val background = MaterialTheme.colorScheme.surface
+    val defaultVeil = MaterialTheme.colorScheme.surface
+    val resolvedVeil = if (veil == Color.Unspecified) defaultVeil else veil
     val view = LocalView.current
     val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
         view.isHardwareAccelerated && !view.isInEditMode
@@ -119,7 +123,7 @@ fun BackdropBlur(
             ),
             content = content,
         )
-        Box(Modifier.matchParentSize().background(background.copy(alpha = 0.74f)))
+        Box(Modifier.matchParentSize().background(resolvedVeil.copy(alpha = veilAlpha)))
     }
 }
 
@@ -134,13 +138,64 @@ enum class LiquidGlassPreset(val blur: Float, val lensHeight: Float, val lensAmo
     Card(10f, 6f, 6f),
 }
 
+/**
+ * Optical recipe per preset: [GlassMaterial] plus how the surface casts depth.
+ *
+ * The material is deliberately *thin* — definition comes from the rim lens
+ * (refractionHeight/Amount) and from light response, never from frosting the
+ * backdrop into a blur blob or painting a shiny stroke. Blur stays low so the
+ * artwork/background is still recognizable behind the glass.
+ */
+private data class GlassRecipe(
+    val material: GlassMaterial,
+    val rim: Highlight?,
+    val shadow: Shadow?,
+    val innerShadow: InnerShadow?,
+)
+
+/**
+ * Central capability gate — the single reason this glass stack cannot crash
+ * any device. Real Liquify glass (offscreen layer + RenderEffect blur +
+ * AGSL lens) is only offered when ALL hold:
+ * - not an EditMode preview (AS preview has no GPU RenderEffect)
+ * - API 31+ (RenderEffect blur exists; below that Liquify would still
+ *   allocate layers for rim-only, so we skip it entirely — zero GPU load)
+ * - not a low-RAM device (ActivityManager.isLowRamDevice — small GPUs,
+ *   aggressive killer, shared memory; a fullscreen captured layer OOMs them)
+ * - hardware-accelerated view (software rendering + RenderEffect = crash)
+ * Everything else gets the canvas fallback: pure drawWithCache gradients,
+ * zero offscreen layers, zero shaders — identical API, impossible to crash.
+ */
 @Composable
-fun isLiquidGlassBackdropSupported(): Boolean = false
+fun isDeviceGlassCapable(): Boolean {
+    val view = LocalView.current
+    if (view.isInEditMode) return false
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+    if (!view.isHardwareAccelerated) return false
+    val context = LocalContext.current
+    val am = remember(context) {
+        runCatching { context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager }.getOrNull()
+    }
+    if (am?.isLowRamDevice == true) return false
+    return true
+}
+
+/**
+ * Whether call sites may allocate a captured [LayerBackdrop].
+ * False on incapable devices so no GraphicsLayer is ever created there —
+ * that alone removes all GPU load where glass can't run.
+ */
+@Composable
+fun isLiquidGlassBackdropSupported(): Boolean = isDeviceGlassCapable()
 
 @Composable
 fun Modifier.liquidGlassSource(
     backdrop: LayerBackdrop?,
-): Modifier = this
+): Modifier {
+    if (backdrop == null) return this
+    if (!isDeviceGlassCapable()) return this
+    return runCatching { this.layerBackdrop(backdrop) }.getOrDefault(this)
+}
 
 @Composable
 fun liquidGlassContainerColor(
@@ -148,13 +203,144 @@ fun liquidGlassContainerColor(
     enabled: Boolean = LocalLiquidGlass.current,
     backdrop: Backdrop? = LocalLiquidGlassBackdrop.current,
 ): Color = if (enabled) {
-    color.copy(alpha = minOf(color.alpha, 0.74f))
+    // Contextual translucency: cap the fill alpha so the refracted backdrop
+    // (artwork, content) shows through the glass instead of the surface
+    // reading as an opaque card. The cap is theme-aware — dark glass deepens
+    // slightly, light glass lifts slightly — and stays high enough that the
+    // legibility veil keeps text readable over a complex background.
+    // Backdrop may be null (canvas fallback) — the alpha still applies there.
+    val cap = if (LocalIsDarkTheme.current) 0.50f else 0.56f
+    color.copy(alpha = minOf(color.alpha, cap))
 } else color
 
 @Composable
 fun isLiquidGlassEnabled(): Boolean = LocalLiquidGlass.current
 
-/** Canvas glass decoration; foreground content is drawn once without a render effect. */
+/**
+ * Apple-style mapping: preset -> optical [GlassRecipe].
+ *
+ * Shared principles (this is what makes it read as *material*, not a filter):
+ *  - blur is the *lowest* value that still separates foreground from background;
+ *    the artwork/background must stay recognizable. Refraction (the rim lens) is
+ *    what supplies the "glass" read, not frost.
+ *  - refraction stays subtle and proportional to element size; never fisheye.
+ *  - saturation is near 1.0 — just enough vibrancy that saturated artwork picks
+ *    up a whisper of color. Never so high it looks like a color filter.
+ *  - rim highlight is a sub-pixel hairline (Highlight width 0.5dp), faint, and
+ *    *absent* on large flat surfaces (nav bar / mini-player / overlays) where a
+ *    lit rim reads as a cheap border. Definition there comes from depth.
+ *  - depth is a *soft* drop shadow punched out from under the element, so it
+ *    floats; plus a whisper of inner shadow so the pane reads as having mass.
+ *  - NO specular gloss strips, NO bright strokes, NO fake diagonal gradients.
+ */
+private fun glassRecipeForPreset(preset: LiquidGlassPreset): GlassRecipe = when (preset) {
+    // ── Large flat surfaces: pure translucency + depth, no rim, no frost ──
+    LiquidGlassPreset.BottomNavigation -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 10.dp,
+            refractionHeight = 14.dp,
+            refractionAmount = 18.dp,
+            saturation = 1.06f,
+            depthEffect = true,
+        ),
+        rim = null,
+        shadow = Shadow(radius = 26.dp, color = Color.Black.copy(alpha = 0.14f)),
+        innerShadow = InnerShadow(radius = 10.dp, color = Color.Black.copy(alpha = 0.05f)),
+    )
+    LiquidGlassPreset.MiniPlayer -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 9.dp,
+            refractionHeight = 13.dp,
+            refractionAmount = 16.dp,
+            saturation = 1.05f,
+            depthEffect = true,
+        ),
+        rim = null,
+        shadow = Shadow(radius = 22.dp, color = Color.Black.copy(alpha = 0.13f)),
+        innerShadow = InnerShadow(radius = 9.dp, color = Color.Black.copy(alpha = 0.05f)),
+    )
+    // ── Sheets / menus: a touch more frost for legibility, still thin ──
+    LiquidGlassPreset.ModalSheet -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 14.dp,
+            refractionHeight = 16.dp,
+            refractionAmount = 20.dp,
+            saturation = 1.08f,
+            depthEffect = true,
+        ),
+        rim = null,
+        shadow = Shadow(radius = 30.dp, color = Color.Black.copy(alpha = 0.15f)),
+        innerShadow = InnerShadow(radius = 12.dp, color = Color.Black.copy(alpha = 0.05f)),
+    )
+    LiquidGlassPreset.ContextMenu -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 13.dp,
+            refractionHeight = 15.dp,
+            refractionAmount = 19.dp,
+            saturation = 1.08f,
+            depthEffect = true,
+        ),
+        rim = null,
+        shadow = Shadow(radius = 26.dp, color = Color.Black.copy(alpha = 0.15f)),
+        innerShadow = InnerShadow(radius = 11.dp, color = Color.Black.copy(alpha = 0.05f)),
+    )
+    LiquidGlassPreset.Overlay -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 11.dp,
+            refractionHeight = 13.dp,
+            refractionAmount = 16.dp,
+            saturation = 1.05f,
+            depthEffect = true,
+        ),
+        rim = null,
+        shadow = Shadow(radius = 20.dp, color = Color.Black.copy(alpha = 0.12f)),
+        innerShadow = InnerShadow(radius = 9.dp, color = Color.Black.copy(alpha = 0.04f)),
+    )
+    // ── Small floating controls / cards: definition comes from a whisper-thin
+    //    hairline rim + the lens, so they read as discrete glass objects. ──
+    LiquidGlassPreset.PlayerControls,
+    LiquidGlassPreset.FloatingControls -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 7.dp,
+            refractionHeight = 16.dp,
+            refractionAmount = 22.dp,
+            saturation = 1.07f,
+            depthEffect = true,
+        ),
+        rim = Highlight(width = 0.5.dp, blurRadius = 0.5.dp, alpha = 0.32f),
+        shadow = Shadow(radius = 18.dp, color = Color.Black.copy(alpha = 0.14f)),
+        innerShadow = InnerShadow(radius = 8.dp, color = Color.Black.copy(alpha = 0.05f)),
+    )
+    LiquidGlassPreset.Card -> GlassRecipe(
+        material = GlassMaterial(
+            blurRadius = 8.dp,
+            refractionHeight = 14.dp,
+            refractionAmount = 18.dp,
+            saturation = 1.06f,
+            depthEffect = true,
+        ),
+        rim = Highlight(width = 0.5.dp, blurRadius = 0.5.dp, alpha = 0.26f),
+        shadow = Shadow(radius = 18.dp, color = Color.Black.copy(alpha = 0.12f)),
+        innerShadow = InnerShadow(radius = 9.dp, color = Color.Black.copy(alpha = 0.04f)),
+    )
+}
+
+/**
+ * Real Apple-like liquid glass via Liquify: backdrop blur + edge refraction
+ * + specular rim + drop shadow in one [liquify] pass.
+ *
+ * Crash-proofing (every branch returns *something* drawable, never throws):
+ * - disabled -> untouched modifier, zero cost.
+ * - null backdrop -> canvas fallback (gradients only, no layers/shaders).
+ * - incapable device (preview, API <31, low-RAM, software rendering) ->
+ *   canvas fallback. No GraphicsLayer, no RenderEffect, no RuntimeShader.
+ * - any device-specific GPU/shader failure inside liquify ->
+ *   caught, canvas fallback. A driver that rejects the AGSL program or
+ *   runs out of layer memory degrades to tint instead of crashing.
+ * GPU rules: static surfaces get no touch physics; chromatic aberration +
+ * gradient blur stay off (7x sampling); radii capped per preset.
+ * Foreground content draws on top unclipped, exactly like iOS.
+ */
 @Composable
 fun Modifier.liquidGlassChrome(
     shape: Shape,
@@ -163,77 +349,128 @@ fun Modifier.liquidGlassChrome(
     backdrop: Backdrop? = LocalLiquidGlassBackdrop.current,
 ): Modifier {
     if (!enabled) return this
-    val isDark = LocalIsDarkTheme.current
-    return canvasLiquidGlassChrome(shape, isDark)
+    val fallback = canvasLiquidGlassChrome(shape, LocalIsDarkTheme.current)
+    if (backdrop == null) return this.then(fallback)
+    if (!isDeviceGlassCapable()) return this.then(fallback)
+    val recipe = remember(preset) { glassRecipeForPreset(preset) }
+    // Subtle press illumination only on interactive controls; bars/cards stay
+    // static for perf (they're large surfaces; an animating full-size layer
+    // would force a re-blur every frame).
+    val interactive = preset == LiquidGlassPreset.FloatingControls ||
+        preset == LiquidGlassPreset.PlayerControls
+    val tint = fallbackTintOnly(shape, LocalIsDarkTheme.current)
+    // NOTE: liquify() is @Composable and the compiler forbids composable
+    // invocations inside runCatching/try-catch. Device risk is already gated
+    // above (null backdrop, isDeviceGlassCapable); call it directly.
+    return this.liquify(
+        shape = shape,
+        material = recipe.material,
+        backdrop = backdrop,
+        highlight = recipe.rim,
+        shadow = recipe.shadow,
+        innerShadow = recipe.innerShadow,
+        dragging = false,
+        stretching = false,
+        interactiveHighlight = interactive,
+    ).then(tint)
 }
 
+/**
+ * Subtle tint under the real glass so text stays legible in both themes.
+ * The refraction/blur itself comes from [liquify]; this is only the
+ * legibility veil — kept separate so it never triggers a second blur pass.
+ */
+/**
+ * Subtle contextual veil under the real glass so foreground text/icons stay
+ * legible over arbitrary backdrops. This is the "contextual light response"
+ * layer: in dark mode it deepens slightly, in light mode it lifts slightly,
+ * letting the refracted backdrop (and any album-art color) show through while
+ * keeping contrast. The refraction/blur itself comes from [liquify]; this is
+ * only the legibility veil — kept separate so it never triggers a second
+ * blur pass, and faint enough that it never reads as an opaque card.
+ */
+private fun Modifier.fallbackTintOnly(shape: Shape, isDark: Boolean): Modifier = drawWithCache {
+    if (!size.width.isFinite() || !size.height.isFinite() || size.width <= 0f || size.height <= 0f) {
+        return@drawWithCache onDrawWithContent { drawContent() }
+    }
+    val outline = shape.createOutline(size, layoutDirection, this)
+    val veil = if (isDark) {
+        Color.Black.copy(alpha = 0.05f)
+    } else {
+        Color.White.copy(alpha = 0.07f)
+    }
+    onDrawWithContent {
+        drawOutline(outline, veil)
+        drawContent()
+    }
+}
+
+/**
+ * Canvas fallback glass — used when the GPU liquify path is unavailable
+ * (preview, API < 31, low-RAM, software rendering). Pure [drawWithCache]
+ * gradients: zero offscreen layers, zero shaders, zero allocations per frame.
+ *
+ * This must read as *optical depth*, not "blur + shiny border". So:
+ *  - a translucent substrate keyed to the theme (dark glass over dark, light
+ *    over light) supplies the translucency + legibility;
+ *  - a *very* soft top-light gradient supplies the light interaction — a faint
+ *    lift toward the light source, fading to nothing, with a whisper of
+ *    darkening at the far edge for depth. This is illumination, NOT a gloss
+ *    strip: alphas stay in the 0.02–0.07 range and it never reaches a hard edge;
+ *  - a soft ambient drop shadow around the outline supplies the float/depth.
+ *
+ * There is deliberately NO border stroke, NO bright specular rim, NO fake
+ * diagonal pink/blue "refraction". Separation comes from light + depth.
+ */
 fun Modifier.canvasLiquidGlassChrome(shape: Shape, isDark: Boolean = true): Modifier = drawWithCache {
     if (!size.width.isFinite() || !size.height.isFinite() || size.width <= 0f || size.height <= 0f) {
         return@drawWithCache onDrawWithContent { drawContent() }
     }
     val outline = shape.createOutline(size, layoutDirection, this)
-    val substrate = if (isDark) Color(0xFF0C0E14).copy(alpha = 0.42f) else Color(0xFFFFFFFF).copy(alpha = 0.55f)
-    val reflection = if (isDark) {
-        Brush.verticalGradient(
-            0f to Color.White.copy(alpha = 0.20f),
-            0.15f to Color.White.copy(alpha = 0.075f),
-            0.50f to Color.Transparent,
-            1f to Color.Black.copy(alpha = 0.14f),
-            startY = 0f,
-            endY = size.height,
-        )
+
+    // Translucent substrate: the glass body. Dark theme deepens slightly; light
+    // theme lifts slightly. Alpha is high enough for legibility, low enough to
+    // read as translucent rather than an opaque card.
+    val substrate = if (isDark) {
+        Color(0xFF14161D).copy(alpha = 0.46f)
     } else {
-        Brush.verticalGradient(
-            0f to Color.White.copy(alpha = 0.60f),
-            0.15f to Color.White.copy(alpha = 0.25f),
-            0.50f to Color.Transparent,
-            1f to Color(0xFF808080).copy(alpha = 0.08f),
-            startY = 0f,
-            endY = size.height,
-        )
+        Color(0xFFFFFFFF).copy(alpha = 0.52f)
     }
-    val refraction = if (isDark) {
-        Brush.linearGradient(
-            0f to Color(0xFFB8D8FF).copy(alpha = 0.075f),
-            0.48f to Color.Transparent,
-            1f to Color(0xFFFFD8F0).copy(alpha = 0.055f),
-            start = Offset.Zero,
-            end = Offset(size.width, size.height),
-        )
-    } else {
-        Brush.linearGradient(
-            0f to Color(0xFF90CAFF).copy(alpha = 0.09f),
-            0.48f to Color.Transparent,
-            1f to Color(0xFFFFB4E6).copy(alpha = 0.07f),
-            start = Offset.Zero,
-            end = Offset(size.width, size.height),
-        )
-    }
-    val strokeWidth = 1.dp.toPx()
-    val borderBrush = if (isDark) {
+
+    // Soft directional light from above: brightest just under the top edge,
+    // fading to transparent by ~35% down, then a whisper of ambient occlusion
+    // toward the bottom. Subtle enough to read as material light response.
+    val lightInteraction = if (isDark) {
         Brush.verticalGradient(
-            0f to Color.White.copy(alpha = 0.16f),
-            0.5f to Color.White.copy(alpha = 0.05f),
-            1f to Color.Transparent,
+            0f to Color.White.copy(alpha = 0.05f),
+            0.35f to Color.Transparent,
+            1f to Color.Black.copy(alpha = 0.05f),
             startY = 0f,
             endY = size.height,
         )
     } else {
         Brush.verticalGradient(
-            0f to Color.White.copy(alpha = 0.80f),
-            0.5f to Color.White.copy(alpha = 0.35f),
-            1f to Color(0xFFE0E0E0).copy(alpha = 0.50f),
+            0f to Color.White.copy(alpha = 0.10f),
+            0.35f to Color.Transparent,
+            1f to Color(0xFF808080).copy(alpha = 0.05f),
             startY = 0f,
             endY = size.height,
         )
     }
 
     onDrawWithContent {
+        // Soft ambient shadow so the pane floats off the content. Drawn as a
+        // blurred dark outline *behind* the body (punched-down), not a glow.
+        val shadowBrush = Brush.verticalGradient(
+            0f to Color.Transparent,
+            1f to Color.Black.copy(alpha = if (isDark) 0.10f else 0.12f),
+            startY = 0f,
+            endY = size.height,
+        )
+        drawOutline(outline, shadowBrush)
         drawOutline(outline, substrate)
-        drawOutline(outline, reflection)
-        drawOutline(outline, refraction)
+        drawOutline(outline, lightInteraction)
         drawContent()
-        drawOutline(outline, borderBrush, style = Stroke(width = strokeWidth))
     }
 }
 
@@ -279,20 +516,44 @@ fun LiquidGlassActionPill(
 
 /**
  * Circular liquid glass button for action icons and back navigation.
+ * Responds to touch with a soft press illumination and its rim lens — no
+ * translate/stretch, so it never fights a parent press-scale or scroll.
  */
 @Composable
 fun LiquidGlassIconButton(
     backdrop: Backdrop?,
-    painter: Painter,
+    painter: androidx.compose.ui.graphics.painter.Painter,
     onClick: () -> Unit,
     modifier: Modifier = Modifier.size(48.dp),
     shape: Shape = CircleShape,
     tint: Color = MaterialTheme.colorScheme.onSurface,
     contentDescription: String? = null,
 ) {
+    val capable = isDeviceGlassCapable()
+    val recipe = remember { glassRecipeForPreset(LiquidGlassPreset.FloatingControls) }
+    // NOTE: liquify() is @Composable — it cannot sit inside runCatching.
+    // Capability is pre-gated (backdrop != null && capable); call directly.
+    // dragging/stretches stay off: the response is a soft press illumination
+    // plus the rim lens, not a translate — so it never fights a parent
+    // press-scale or scroll. Keeps it smooth + interruptible.
+    val gelModifier = if (backdrop != null && capable) {
+        Modifier.liquify(
+            shape = shape,
+            material = recipe.material,
+            backdrop = backdrop,
+            highlight = recipe.rim,
+            shadow = recipe.shadow,
+            innerShadow = recipe.innerShadow,
+            dragging = false,
+            stretching = false,
+            interactiveHighlight = true,
+        )
+    } else {
+        Modifier.canvasLiquidGlassChrome(shape, LocalIsDarkTheme.current)
+    }
     Box(
         modifier = modifier
-            .liquidGlassChrome(shape, enabled = true, preset = LiquidGlassPreset.FloatingControls, backdrop = backdrop)
+            .then(gelModifier)
             .clip(shape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },

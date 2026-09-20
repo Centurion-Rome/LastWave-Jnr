@@ -78,6 +78,7 @@ data class SettingsScreenState(
 class SettingsViewModel @Inject constructor(
     private val authRepository: AuthRepository,
     private val authCallback: com.lastwave.app.data.repository.LastFmAuthCallbackCoordinator,
+    private val homeRepository: com.lastwave.app.data.repository.HomeRepository,
     private val sessionPreferences: SessionPreferences,
     private val themeRepository: ThemeRepository,
     private val settingsPreferences: SettingsPreferences,
@@ -127,10 +128,17 @@ class SettingsViewModel @Inject constructor(
     val hiddenYtLibraryPlaylistIds: StateFlow<Set<String>> = ytMusicPreferences.hiddenLibraryPlaylistIds
         .withSettingsFallback("YouTube library visibility", emptySet())
         .stateIn(viewModelScope, SettingsSharing, emptySet())
+    private val _ytChannels = MutableStateFlow<List<com.lastwave.app.data.music.YtChannelOption>>(emptyList())
+    val ytChannels: StateFlow<List<com.lastwave.app.data.music.YtChannelOption>> = _ytChannels.asStateFlow()
+    private val _ytChannelsLoading = MutableStateFlow(false)
+    val ytChannelsLoading: StateFlow<Boolean> = _ytChannelsLoading.asStateFlow()
     val allPlaylists: StateFlow<List<com.lastwave.app.data.playlist.SavedPlaylist>> = playlistRepository.playlists
-        .map { playlists -> playlists.filterNot { it.mode == com.lastwave.app.data.playlist.LIKED_SONGS_MODE } }
+        .map { playlists -> playlists }
         .withSettingsFallback("playlists", emptyList())
         .stateIn(viewModelScope, SettingsSharing, emptyList())
+
+    private val _avatarUrl = MutableStateFlow<String?>(null)
+    val avatarUrl: StateFlow<String?> = _avatarUrl.asStateFlow()
 
     val session: StateFlow<SessionData> = kotlinx.coroutines.flow.combine(
         sessionPreferences.session,
@@ -146,6 +154,20 @@ class SettingsViewModel @Inject constructor(
     }
         .withSettingsFallback("session", SessionData())
         .stateIn(viewModelScope, SettingsSharing, SessionData())
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            session.collect { sess ->
+                if (sess.username.isNotBlank()) {
+                    homeRepository.fetchStats(sess.username).onSuccess { stats ->
+                        _avatarUrl.value = stats.avatarUrl
+                    }
+                } else {
+                    _avatarUrl.value = null
+                }
+            }
+        }
+    }
 
     val theme: StateFlow<ThemeUiState> = themeRepository.uiState
 
@@ -378,6 +400,7 @@ class SettingsViewModel @Inject constructor(
     fun setPreferLosslessStreaming(enabled: Boolean) = launchSettingsAction("update streaming preference") { settingsPreferences.setPreferLosslessStreaming(enabled) }
     fun setLosslessQuality(quality: Int) = launchSettingsAction("update streaming quality") { settingsPreferences.setLosslessQuality(quality) }
     fun setDownloadQuality(quality: Int) = launchSettingsAction("update download quality") { settingsPreferences.setDownloadQuality(quality) }
+    fun setDolbyAtmosEnabled(enabled: Boolean) = launchSettingsAction("update Dolby Atmos preference") { settingsPreferences.setDolbyAtmosEnabled(enabled) }
     fun setStudioMasterClarity(enabled: Boolean) {
         // Apply immediately; DataStore persists the same state for future engine instances.
         launchSettingsAction("update Studio Master Clarity") {
@@ -404,6 +427,7 @@ class SettingsViewModel @Inject constructor(
     fun setLyricsUiVersion(version: LyricsUiVersion) = launchSettingsAction("update lyrics UI version") { settingsPreferences.setLyricsUiVersion(version) }
     fun setWordByWordLyrics(enabled: Boolean) = launchSettingsAction("update word-by-word lyrics") { settingsPreferences.setWordByWordLyrics(enabled) }
     fun setLyricsAnimation(animation: com.lastwave.app.data.local.LyricsAnimation) = launchSettingsAction("update lyrics animation") { settingsPreferences.setLyricsAnimation(animation) }
+    fun setLyricsProvider(provider: com.lastwave.app.data.local.LyricsProvider) = launchSettingsAction("update lyrics provider") { settingsPreferences.setLyricsProvider(provider) }
     fun setCrossfadeEnabled(enabled: Boolean) = launchSettingsAction("update crossfade") { settingsPreferences.setCrossfadeEnabled(enabled) }
     fun setCrossfadeSeconds(seconds: Int) = launchSettingsAction("update crossfade duration") {
         settingsPreferences.setCrossfadeSeconds(seconds.coerceIn(1, 12))
@@ -798,6 +822,57 @@ class SettingsViewModel @Inject constructor(
                 playlistIds = ytAccountPlaylists.value.mapTo(mutableSetOf()) { it.id },
                 visible = visible,
             )
+        }
+    }
+
+    /** Lists every channel/profile switchable inside the signed-in session. */
+    fun loadYtChannels() {
+        if (_ytChannelsLoading.value) return
+        viewModelScope.launch {
+            if (!ytAuthManager.connection.value.isConnected) {
+                _ytChannels.value = emptyList()
+                return@launch
+            }
+            _ytChannelsLoading.value = true
+            try {
+                _ytChannels.value = innerTube.fetchAvailableChannels()
+                if (_ytChannels.value.isEmpty()) {
+                    _uiState.update { it.copy(toastMessage = "Couldn't load YouTube channels. Please try again.") }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                android.util.Log.e(SETTINGS_TAG, "Failed to load YouTube channels", error)
+                _uiState.update { it.copy(toastMessage = "Couldn't load YouTube channels. Please try again.") }
+            } catch (error: LinkageError) {
+                _uiState.update { it.copy(toastMessage = "This action isn't supported on this device.") }
+            } finally {
+                _ytChannelsLoading.value = false
+            }
+        }
+    }
+
+    /**
+     * Switches the active YouTube channel inside the current session
+     * (cookies unchanged — the selection rides per-request). The library
+     * refreshes for the new channel and sync mirrors are kept per channel,
+     * so each channel re-mirrors cleanly instead of reconciling against
+     * another channel's playlists.
+     */
+    fun selectYtChannel(channel: com.lastwave.app.data.music.YtChannelOption) {
+        launchSettingsAction("switch YouTube channel") {
+            ytMusicPreferences.saveChannelSelection(
+                channel.channelId,
+                channel.authUserIndex,
+                channel.accountName,
+                channel.channelHandle,
+                channel.photoUrl,
+            )
+            _uiState.update { it.copy(toastMessage = "Switched to ${channel.accountName} — refreshing library…") }
+            runCatching { ytMusicLibraryManager.refresh() }
+            if (ytSyncEnabled.value) {
+                runCatching { ytMusicSyncManager.syncNow("channel_switch") }
+            }
         }
     }
 

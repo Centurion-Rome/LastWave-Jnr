@@ -183,7 +183,7 @@ fun HomeScreen(
         topBar = {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 ExpressiveHeader(
-                    title = "Stats",
+                    title = "Statistics",
                     modifier = Modifier.adaptiveContentWidth(maxWidth = 860.dp),
                     actions = {
                         HeaderActionIcon(Icons.Filled.Explore, "Discover", onOpenDiscover)
@@ -922,14 +922,6 @@ private fun MixHeader(sortMode: HomeSortMode, onSortModeChange: (HomeSortMode) -
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onSortModeChange(HomeSortMode.MOST_PLAYED); menuOpen = false
                 }
-                SortOption(Icons.Filled.Album, "Top Albums", sortMode == HomeSortMode.TOP_ALBUMS) {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onSortModeChange(HomeSortMode.TOP_ALBUMS); menuOpen = false
-                }
-                SortOption(Icons.Filled.People, "Top Artists", sortMode == HomeSortMode.TOP_ARTISTS) {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onSortModeChange(HomeSortMode.TOP_ARTISTS); menuOpen = false
-                }
                 SortOption(Icons.Filled.DateRange, "Last 7 Days", sortMode == HomeSortMode.LAST_7_DAYS) {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onSortModeChange(HomeSortMode.LAST_7_DAYS); menuOpen = false
@@ -937,6 +929,14 @@ private fun MixHeader(sortMode: HomeSortMode, onSortModeChange: (HomeSortMode) -
                 SortOption(Icons.Filled.CalendarMonth, "Last 30 Days", sortMode == HomeSortMode.LAST_30_DAYS) {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onSortModeChange(HomeSortMode.LAST_30_DAYS); menuOpen = false
+                }
+                SortOption(Icons.Filled.People, "Top Artists", sortMode == HomeSortMode.TOP_ARTISTS) {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onSortModeChange(HomeSortMode.TOP_ARTISTS); menuOpen = false
+                }
+                SortOption(Icons.Filled.Album, "Top Albums", sortMode == HomeSortMode.TOP_ALBUMS) {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onSortModeChange(HomeSortMode.TOP_ALBUMS); menuOpen = false
                 }
             }
         }
@@ -1085,14 +1085,17 @@ private fun TrackRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    com.lastwave.app.util.ArtistHelper.primaryArtist(track.artist),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = secondaryTextColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                val displayArtist = com.lastwave.app.util.ArtistHelper.primaryArtist(track.artist)
+                if (displayArtist.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        displayArtist,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = secondaryTextColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Spacer(Modifier.width(8.dp))
             if (isNowPlaying) {
@@ -1335,14 +1338,17 @@ private fun AlbumRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    com.lastwave.app.util.ArtistHelper.primaryArtist(album.artist),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                val displayArtist = com.lastwave.app.util.ArtistHelper.primaryArtist(album.artist)
+                if (displayArtist.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        displayArtist,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }

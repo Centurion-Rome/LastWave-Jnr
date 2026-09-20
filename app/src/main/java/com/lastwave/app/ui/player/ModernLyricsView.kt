@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lastwave.app.data.lyrics.LyricLine
+import com.lastwave.app.data.lyrics.LyricSyllable
 import com.lastwave.app.data.lyrics.isRtlText
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.MusicPlayerState
@@ -105,9 +108,11 @@ fun ModernLyricsPanel(
         initialValue = PlaybackProgressState(positionMs = state.positionMs, durationMs = state.durationMs),
     )
 
-    var smoothedPositionMs by remember(track.videoId) { mutableLongStateOf(progress.positionMs) }
-    var basePositionMs by remember(track.videoId) { mutableLongStateOf(progress.positionMs) }
-    var lastSyncTime by remember(track.videoId) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    // Keyed on the whole track: videoId is null for local/search tracks,
+    // and a null key would leak the previous song's smoothing state.
+    var smoothedPositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
+    var basePositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
+    var lastSyncTime by remember(track) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
     LaunchedEffect(progress.positionMs, state.isPlaying) {
         basePositionMs = progress.positionMs
@@ -153,12 +158,12 @@ fun ModernLyricsPanel(
                             ExpressiveInlineLoadingIndicator(
                                 size = 42.dp,
                                 strokeWidth = 3.5.dp,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = Color.White,
                             )
                             Text(
                                 "Finding lyrics…",
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = Color.White.copy(alpha = 0.70f),
                             )
                         }
                     }
@@ -198,7 +203,13 @@ fun ModernLyricsPanel(
                             val idx = syncedLyrics.lines.indexOfFirst { time in it.start..it.end }
                             if (idx != -1) idx else syncedLyrics.lines.indexOfFirst { it.start > time }.takeIf { it != -1 } ?: 0
                         }
-                        val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialLineIndex)
+                        // Reset scroll state whenever the lyrics themselves
+                        // change (new track or provider upgrade); otherwise
+                        // the previous song's scroll offset leaks into this
+                        // one until auto-scroll corrects it.
+                        val listState = key(syncedLyrics) {
+                            rememberLazyListState(initialFirstVisibleItemIndex = initialLineIndex)
+                        }
 
                         val layoutDirection = if (isOverallRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
                         // Short provider badge: makes it visible why words
@@ -213,7 +224,7 @@ fun ModernLyricsPanel(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(top = 12.dp),
+                                    .padding(top = 8.dp),
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -223,8 +234,8 @@ fun ModernLyricsPanel(
                                 ) {
                                     Surface(
                                         shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        color = liquidGlassContainerColor(Color.White.copy(alpha = 0.16f)),
+                                        contentColor = Color.White.copy(alpha = 0.92f),
                                     ) {
                                         Text(
                                             text = syncLabel,
@@ -236,32 +247,33 @@ fun ModernLyricsPanel(
                                         )
                                     }
                                 }
-                            KaraokeLyricsView(
-                                listState = listState,
-                                lyrics = syncedLyrics,
-                                showTranslation = true,
-                                showPhonetic = true,
-                                currentPosition = { smoothedPositionMs.toInt() },
-                                onLineClicked = { line ->
-                                    player.seekTo(line.start.toLong())
-                                },
-                                onLinePressed = {},
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth(),
-                                offset = 84.dp,
-                                normalLineTextStyle = LocalTextStyle.current.copy(
-                                    fontSize = if (isWordSynced) 34.sp else 27.sp,
-                                    fontWeight = FontWeight.Black,
-                                    textMotion = TextMotion.Animated,
-                                ),
-                                accompanimentLineTextStyle = LocalTextStyle.current.copy(
-                                    fontSize = if (isWordSynced) 22.sp else 19.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    textMotion = TextMotion.Animated,
-                                ),
-                                textColor = Color.White,
-                            )
+                                KaraokeLyricsView(
+                                    listState = listState,
+                                    lyrics = syncedLyrics,
+                                    showTranslation = true,
+                                    showPhonetic = true,
+                                    currentPosition = { smoothedPositionMs.toInt() },
+                                    onLineClicked = { line ->
+                                        player.seekTo(line.start.toLong())
+                                    },
+                                    onLinePressed = {},
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 24.dp),
+                                    offset = 84.dp,
+                                    normalLineTextStyle = LocalTextStyle.current.copy(
+                                        fontSize = if (isWordSynced) 28.sp else 24.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textMotion = TextMotion.Animated,
+                                    ),
+                                    accompanimentLineTextStyle = LocalTextStyle.current.copy(
+                                        fontSize = if (isWordSynced) 20.sp else 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textMotion = TextMotion.Animated,
+                                    ),
+                                    textColor = Color.White,
+                                )
                             }
                         }
                     } else if (!targetState.plainLyrics.isNullOrBlank()) {
@@ -308,22 +320,20 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
     val isLineRtl = isRtl || (isOverallRtl && (text.isBlank() || text == "♪"))
 
     return if (hasSyllables) {
-        // Word-sync providers (BetterLyrics TTML spans, LyricsPlus syllabus)
-        // store each word trimmed, so concatenating contents directly would
-        // render "Allthatglittersisgold". The trailing space carries no
-        // timing — it is purely visual and keeps sync exact. Only insert
-        // when the line itself contains spaces so CJK lines without spaces
-        // and already-spaced providers (Kugou KRC) are untouched.
+        val leadSyllables = syllables.filter { !it.isBackground }.ifEmpty { syllables }
+        val bgSyllables = if (leadSyllables.size < syllables.size) syllables.filter { it.isBackground } else emptyList()
         val needsSpacing = text.contains(' ') || text.contains('\u00A0')
-        KaraokeLine.MainKaraokeLine(
-            syllables = syllables.mapIndexed { index, syl ->
+
+        fun List<LyricSyllable>.toKaraokeSyllables(): List<KaraokeSyllable> {
+            return mapIndexed { index, syl ->
                 val sStart = syl.timeMs.toInt()
                 val sEnd = (syl.timeMs + syl.durationMs).toInt().coerceAtLeast(sStart)
-                val next = syllables.getOrNull(index + 1)
+                val next = getOrNull(index + 1)
                 val separator = if (needsSpacing &&
-                    index < syllables.lastIndex &&
+                    index < lastIndex &&
                     !syl.text.endsWith(' ') &&
                     !syl.text.endsWith('\u00A0') &&
+                    next?.appendToPrevious != true &&
                     (next == null || (!next.text.startsWith(' ') && !next.text.startsWith('\u00A0')))
                 ) " " else ""
                 KaraokeSyllable(
@@ -331,12 +341,35 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
                     start = sStart,
                     end = sEnd,
                 )
-            },
+            }
+        }
+
+        val mainSyllables = leadSyllables.toKaraokeSyllables()
+        val accompaniment = if (bgSyllables.isNotEmpty()) {
+            val bgStart = bgSyllables.first().timeMs.toInt()
+            val bgEnd = (bgSyllables.last().timeMs + bgSyllables.last().durationMs).toInt().coerceAtLeast(bgStart)
+            listOf(
+                KaraokeLine.AccompanimentKaraokeLine(
+                    syllables = bgSyllables.toKaraokeSyllables(),
+                    translation = null,
+                    alignment = if (isLineRtl) KaraokeAlignment.Start else KaraokeAlignment.End,
+                    start = bgStart,
+                    end = bgEnd,
+                    phonetic = null,
+                ),
+            )
+        } else {
+            emptyList()
+        }
+
+        KaraokeLine.MainKaraokeLine(
+            syllables = mainSyllables,
             translation = null,
             phonetic = transliteration,
             alignment = if (isLineRtl) KaraokeAlignment.End else KaraokeAlignment.Start,
             start = lineStart,
             end = lineEnd.coerceAtLeast(lineStart),
+            accompanimentLines = accompaniment,
         )
     } else {
         SyncedLine(
@@ -379,12 +412,12 @@ private fun ModernPlainLyricsView(
                     Icons.Filled.SyncDisabled,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = Color.White.copy(alpha = 0.90f),
                 )
                 Text(
                     "Lyrics not time-synced",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.70f),
                 )
             }
 
@@ -397,7 +430,7 @@ private fun ModernPlainLyricsView(
                     letterSpacing = 0.1.sp,
                 ),
                 textAlign = TextAlign.Start,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.94f),
+                color = Color.White.copy(alpha = 0.94f),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -423,14 +456,14 @@ private fun ModernEmptyLyricsView(
                 imageVector = if (isInstrumental) Icons.Filled.MusicOff else Icons.Filled.Lyrics,
                 contentDescription = null,
                 modifier = Modifier.size(42.dp),
-                tint = MaterialTheme.colorScheme.primary,
+                tint = Color.White.copy(alpha = 0.90f),
             )
 
             Text(
                 text = if (isInstrumental) "Instrumental" else "No lyrics",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = Color.White,
             )
 
             Text(
@@ -440,7 +473,7 @@ private fun ModernEmptyLyricsView(
                     "No synced lyrics found for this track."
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color.White.copy(alpha = 0.70f),
                 textAlign = TextAlign.Center,
             )
 
@@ -493,8 +526,8 @@ private fun ModernLyricsControls(
                     onClick = onToggleFullscreen,
                     interactionSource = playerInteraction,
                     shape = CircleShape,
-                    color = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
-                    contentColor = MaterialTheme.colorScheme.primary,
+                    color = liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                    contentColor = Color.White.copy(alpha = 0.90f),
                     tonalElevation = 0.dp,
                     shadowElevation = 0.dp,
                     modifier = Modifier
@@ -528,7 +561,7 @@ private fun ModernLyricsControls(
                 durationMs = totalDurationMs,
                 isPlaying = state.isPlaying,
                 onSeek = player::seekTo,
-                isTranslucent = false,
+                isTranslucent = true,
                 trackKey = state.current?.let { it.videoId ?: "${it.artist}|${it.title}" },
                 showTimeLabels = false,
                 modifier = Modifier.fillMaxWidth(),
@@ -554,7 +587,7 @@ private fun ModernLyricsControls(
             Text(
                 formatTime(shown.toLong()),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.94f),
+                color = Color.White.copy(alpha = 0.85f),
             )
 
             Row(
@@ -567,13 +600,13 @@ private fun ModernLyricsControls(
                         .size(42.dp)
                         .liquidGlassChrome(CircleShape, LocalLiquidGlass.current)
                         .clip(CircleShape)
-                        .background(liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f))),
+                        .background(liquidGlassContainerColor(Color.White.copy(alpha = 0.14f))),
                 ) {
                     Icon(
                         Icons.Filled.SkipPrevious,
                         "Previous",
                         Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        tint = Color.White.copy(alpha = 0.94f),
                     )
                 }
 
@@ -581,8 +614,8 @@ private fun ModernLyricsControls(
                     glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current),
                     onClick = player::togglePlayPause,
                     shape = CircleShape,
-                    color = liquidGlassContainerColor(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)),
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    color = liquidGlassContainerColor(Color.White),
+                    contentColor = Color.Black,
                     tonalElevation = 0.dp,
                     shadowElevation = 0.dp,
                     modifier = Modifier.size(52.dp),
@@ -591,7 +624,7 @@ private fun ModernLyricsControls(
                         if (state.isBuffering) {
                             ExpressiveInlineLoadingIndicator(
                                 size = 22.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                color = Color.Black,
                                 strokeWidth = 2.5.dp,
                             )
                         } else {
@@ -606,13 +639,13 @@ private fun ModernLyricsControls(
                         .size(42.dp)
                         .liquidGlassChrome(CircleShape, LocalLiquidGlass.current)
                         .clip(CircleShape)
-                        .background(liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f))),
+                        .background(liquidGlassContainerColor(Color.White.copy(alpha = 0.14f))),
                 ) {
                     Icon(
                         Icons.Filled.SkipNext,
                         "Next",
                         Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        tint = Color.White.copy(alpha = 0.94f),
                     )
                 }
             }
@@ -620,7 +653,7 @@ private fun ModernLyricsControls(
             Text(
                 "−${formatTime((totalDurationMs - shown.toLong()).coerceAtLeast(0))}",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.94f),
+                color = Color.White.copy(alpha = 0.85f),
             )
         }
     }
