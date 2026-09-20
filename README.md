@@ -13,6 +13,9 @@
   <a href="#">
     <img src="https://img.shields.io/badge/Client-YouTube%20Music-FF0000?style=for-the-badge&logo=youtubemusic&logoColor=white&labelColor=2d2d2d" alt="YouTube Music Client" />
   </a>
+  <a href="./ReleasedApp/LastWave-Jnr-latest.apk">
+    <img src="https://img.shields.io/badge/Download-APK--v1.1.0--Jnr-C6F100?style=for-the-badge&logo=android&logoColor=white&labelColor=012226" alt="Download APK" />
+  </a>
   <a href="#">
     <img src="https://img.shields.io/badge/Version-4.1.1--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 4.1.1-native" />
     <img src="https://img.shields.io/badge/Scrobbler-Last.fm-D51007?style=for-the-badge&logo=lastdotfm&logoColor=white&labelColor=2d2d2d" alt="Last.fm Scrobbler" />
@@ -78,8 +81,8 @@ Built with **Material 3 Expressive**, LastWave combines effortless ad-free strea
 
 ## <img src="https://api.iconify.design/lucide:rocket.svg?color=%23C6F100" width="20" height="20" align="center" /> Getting Started
 
-1. Download the latest APK from the **[Releases](https://github.com/duxtami/LastWave-native/actions)** tab.
-2. Install the single release package (`LastWave-Jnr-v4.1.1-release.apk`).
+1. Download the latest APK: **[LastWave-Jnr-latest.apk](./ReleasedApp/LastWave-Jnr-latest.apk)**.
+2. Install the single release package (`ReleasedApp/LastWave-Jnr-latest.apk`).
 3. Connect your Last.fm account to sync your scrobbles, taste profile, and discovery feed.
 4. Start streaming in bit-perfect lossless quality.
 
