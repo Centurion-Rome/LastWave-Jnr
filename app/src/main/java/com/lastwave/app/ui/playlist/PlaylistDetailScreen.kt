@@ -22,6 +22,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -54,6 +56,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
@@ -88,8 +91,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import com.lastwave.app.ui.theme.LocalLiquidGlass
@@ -107,8 +113,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -132,6 +140,7 @@ import com.lastwave.app.ui.shell.FloatingNavDefaults
 import com.lastwave.app.ui.theme.ArtworkShape
 import com.lastwave.app.ui.theme.ExpressivePillShape
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -209,7 +218,9 @@ fun PlaylistDetailScreen(
     var sortMenuOpen by remember { mutableStateOf(false) }
     var currentSort by remember { mutableStateOf(PlaylistTrackSort.CUSTOM) }
     var sortAscending by remember { mutableStateOf(true) }
-    var isReorderLocked by remember { mutableStateOf(true) }
+    // Persisted per-playlist reorder lock (absent = locked, the original default).
+    val reorderUnlockedIds by viewModel.reorderUnlockedIds.collectAsStateWithLifecycle()
+    val isReorderLocked = playlistId.toString() !in reorderUnlockedIds
 
     val displayTracks = remember(playlist.tracks, currentSort, sortAscending) {
         when (currentSort) {
@@ -234,6 +245,33 @@ fun PlaylistDetailScreen(
     }
 
     val listState = rememberLazyListState()
+    val dragScope = rememberCoroutineScope()
+    var draggingIndex by remember { mutableIntStateOf(-1) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    // Reorder handles are only available in custom sort mode (stored order).
+    val canReorder = currentSort == PlaylistTrackSort.CUSTOM &&
+        !playlist.isYouTubeOnly && !isReorderLocked
+    // Stable keys (occurrence-suffixed) so the drag gesture survives the
+    // layout shift caused by each move — same approach as the Up Next queue.
+    val displayKeys = remember(displayTracks) {
+        val counts = mutableMapOf<String, Int>()
+        displayTracks.map { track ->
+            val base = track.url.takeIf { it.isNotBlank() } ?: track.key
+            val n = counts.getOrDefault(base, 0)
+            counts[base] = n + 1
+            "$base#$n"
+        }
+    }
+    LaunchedEffect(displayTracks.size) {
+        if (draggingIndex >= displayTracks.size) {
+            draggingIndex = -1
+            dragOffsetY = 0f
+        }
+    }
+    LaunchedEffect(currentSort, isReorderLocked) {
+        draggingIndex = -1
+        dragOffsetY = 0f
+    }
     val scrollOffset by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex == 0) {
@@ -554,7 +592,7 @@ fun PlaylistDetailScreen(
                             IconButton(
                                 onClick = {
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    isReorderLocked = !isReorderLocked
+                                    viewModel.toggleReorderLocked(playlistId)
                                 },
                                 modifier = Modifier.size(36.dp),
                             ) {
@@ -603,18 +641,104 @@ fun PlaylistDetailScreen(
             } else {
                 itemsIndexed(
                     items = displayTracks,
-                    key = { index, track -> "${track.name}|${track.artist}|$index" },
+                    key = { index, _ -> displayKeys.getOrNull(index) ?: index.toString() },
                     contentType = { _, _ -> "playlist_track" },
                 ) { index, track ->
                     val isPlayingThisSong = playbackState.isPlaying &&
                         playbackState.current?.title.equals(track.name, ignoreCase = true) &&
                         playbackState.current?.artist.equals(track.artist, ignoreCase = true)
+                    val isDragging = index == draggingIndex
+                    val stableKey = displayKeys.getOrNull(index) ?: index.toString()
 
-                    Box {
+                    Box(
+                        modifier = Modifier
+                            .animateItem()
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                translationY = if (isDragging) dragOffsetY else 0f
+                                shadowElevation = if (isDragging) 18f else 0f
+                                val s = if (isDragging) 1.025f else 1f
+                                scaleX = s
+                                scaleY = s
+                                alpha = if (isDragging) 0.96f else 1f
+                            },
+                    ) {
                         NativeTrackRow(
                             index = index + 1,
                             track = track,
                             isPlaying = isPlayingThisSong,
+                            showDragHandle = canReorder,
+                            isDragging = isDragging,
+                            dragHandleModifier = if (canReorder) {
+                                Modifier.pointerInput(stableKey) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = {
+                                            draggingIndex = index
+                                            dragOffsetY = 0f
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        },
+                                        onDragEnd = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDragCancel = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            val source = draggingIndex
+                                            if (source < 0) return@detectDragGesturesAfterLongPress
+                                            dragOffsetY += dragAmount.y
+                                            val layoutInfo = listState.layoutInfo
+                                            // Key-based lookup (no header-offset assumptions — other
+                                            // variants of this screen may add sticky headers).
+                                            val sourceKey = displayKeys.getOrNull(source)
+                                                ?: return@detectDragGesturesAfterLongPress
+                                            val draggedInfo = layoutInfo.visibleItemsInfo
+                                                .firstOrNull { it.key == sourceKey }
+                                                ?: return@detectDragGesturesAfterLongPress
+                                            val draggedCenter = draggedInfo.offset + draggedInfo.size / 2 + dragOffsetY.toInt()
+                                            val target = layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                                info.key != sourceKey &&
+                                                    draggedCenter in info.offset..(info.offset + info.size)
+                                            }?.key?.let(displayKeys::indexOf)?.takeIf { it >= 0 }
+                                            val targetInfo = target?.let {
+                                                displayKeys.getOrNull(it)?.let { key ->
+                                                    layoutInfo.visibleItemsInfo.firstOrNull { info -> info.key == key }
+                                                }
+                                            }
+                                            if (target != null && target != source && target in displayTracks.indices) {
+                                                // displayTracks in CUSTOM/DESC is reversed(); map to stored indices.
+                                                val toStored = { display: Int ->
+                                                    if (currentSort == PlaylistTrackSort.CUSTOM && !sortAscending) {
+                                                        displayTracks.size - 1 - display
+                                                    } else {
+                                                        display
+                                                    }
+                                                }
+                                                viewModel.moveTrack(playlistId, toStored(source), toStored(target))
+                                                if (targetInfo != null) {
+                                                    dragOffsetY += (draggedInfo.offset - targetInfo.offset).toFloat()
+                                                }
+                                                draggingIndex = target
+                                                haptic.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+                                            }
+                                            val viewportStart = layoutInfo.viewportStartOffset
+                                            val viewportEnd = layoutInfo.viewportEndOffset
+                                            val edgeZone = 180
+                                            when {
+                                                draggedCenter < viewportStart + edgeZone ->
+                                                    dragScope.launch { listState.scrollBy(-28f) }
+                                                draggedCenter > viewportEnd - edgeZone ->
+                                                    dragScope.launch { listState.scrollBy(28f) }
+                                            }
+                                        },
+                                    )
+                                }
+                            } else {
+                                Modifier
+                            },
                             onClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 musicPlayer.playQueue(
@@ -1084,6 +1208,9 @@ private fun NativeTrackRow(
     isPlaying: Boolean,
     onClick: () -> Unit,
     onMenu: () -> Unit,
+    showDragHandle: Boolean = false,
+    isDragging: Boolean = false,
+    dragHandleModifier: Modifier = Modifier,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -1132,15 +1259,22 @@ private fun NativeTrackRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    onClick = onClick,
-                    onLongClick = onMenu,
-                )
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Clickable content area (excludes drag handle + menu so a
+            // long-press on the handle starts a drag instead of the popup menu).
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = onClick,
+                        onLongClick = onMenu,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             // Track index or playing animation
             Box(
                 modifier = Modifier.width(24.dp),
@@ -1236,8 +1370,26 @@ private fun NativeTrackRow(
                 }
                 Spacer(Modifier.width(4.dp))
             }
+            }
 
             // Options menu button
+            if (showDragHandle) {
+                Icon(
+                    Icons.Filled.DragHandle,
+                    contentDescription = "Drag to reorder",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isDragging) 1f else 0.6f),
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                            else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f),
+                        )
+                        .padding(8.dp)
+                        .then(dragHandleModifier),
+                )
+            }
             IconButton(
                 onClick = onMenu,
                 modifier = Modifier.size(36.dp),

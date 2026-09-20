@@ -294,6 +294,22 @@ class PlaylistRepository @Inject constructor(
         return updated.toDomain()
     }
 
+    /** Persists a custom-order move (drag-to-reorder in CUSTOM sort mode).
+     *  Operates on stored track order so reopening in custom mode shows the new order. */
+    suspend fun moveTrack(id: Long, fromIndex: Int, toIndex: Int): SavedPlaylist? {
+        awaitStartupSync()
+        val entity = dao.getById(id) ?: return null
+        val playlist = entity.toDomain()
+        if (fromIndex !in playlist.tracks.indices || toIndex !in playlist.tracks.indices) return playlist
+        if (fromIndex == toIndex) return playlist
+        val reordered = playlist.tracks.toMutableList().apply { add(toIndex, removeAt(fromIndex)) }
+        val updated = entity.copy(tracksJson = json.encodeToString(reordered.map { it.toStored() }))
+        dao.upsert(updated)
+        syncPublicMirror()
+        _changes.tryEmit(Unit)
+        return updated.toDomain()
+    }
+
     suspend fun getLikedSongs(): SavedPlaylist? =
         getAll().firstOrNull { it.mode == LIKED_SONGS_MODE }
 

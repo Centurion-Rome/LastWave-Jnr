@@ -226,6 +226,7 @@ class SettingsPreferences @Inject constructor(
         val USE_ALBUM_ARTIST_FOLDERS = booleanPreferencesKey("lw_use_album_artist_folders")
         val PRIMARY_ARTIST_ONLY = booleanPreferencesKey("lw_primary_artist_only")
         val HIDDEN_HOME_SECTIONS = stringSetPreferencesKey("lw_hidden_home_sections")
+        val REORDER_UNLOCKED_PLAYLIST_IDS = stringSetPreferencesKey("lw_reorder_unlocked_playlist_ids")
     }
 
     val settings: Flow<MiscSettings> = dataStore.data
@@ -375,6 +376,20 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun showAllHomeSections() {
         dataStore.edit { it.remove(Keys.HIDDEN_HOME_SECTIONS) }
+    }
+
+    /** Per-playlist reorder lock. Absent id = locked (original default);
+     *  unlocked ids are stored so the choice survives restarts. */
+    val reorderUnlockedPlaylistIds: Flow<Set<String>> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { p -> p.readSafely(Keys.REORDER_UNLOCKED_PLAYLIST_IDS) ?: emptySet() }
+
+    suspend fun setPlaylistReorderLocked(playlistId: Long, locked: Boolean) {
+        dataStore.edit { prefs ->
+            val current = prefs.readSafely(Keys.REORDER_UNLOCKED_PLAYLIST_IDS) ?: emptySet()
+            prefs[Keys.REORDER_UNLOCKED_PLAYLIST_IDS] =
+                if (locked) current - playlistId.toString() else current + playlistId.toString()
+        }
     }
 
     /**
