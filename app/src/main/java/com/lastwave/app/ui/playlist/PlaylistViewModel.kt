@@ -75,6 +75,7 @@ class PlaylistViewModel @Inject constructor(
     private val ytMusicSyncManager: com.lastwave.app.data.ytmusic.YtMusicSyncManager,
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val trackDownloadManager: com.lastwave.app.data.download.TrackDownloadManager,
+    private val settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PlaylistUiState())
@@ -82,6 +83,18 @@ class PlaylistViewModel @Inject constructor(
 
     val syncedPlaylistIds: StateFlow<Set<Long>?> = ytMusicPreferences.syncedPlaylistIds
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** Ids (as String) of playlists the user unlocked for reordering.
+     *  Absent = locked, matching the original default. */
+    val reorderUnlockedIds: StateFlow<Set<String>> = settingsPreferences.reorderUnlockedPlaylistIds
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    fun toggleReorderLocked(playlistId: Long) {
+        val locked = playlistId.toString() !in reorderUnlockedIds.value
+        viewModelScope.launch {
+            settingsPreferences.setPlaylistReorderLocked(playlistId, !locked)
+        }
+    }
 
     fun toggleYtSync(playlistId: Long) {
         viewModelScope.launch {
@@ -366,6 +379,45 @@ class PlaylistViewModel @Inject constructor(
                 )
             }
             if (id >= 0L) load()
+        }
+    }
+
+    fun moveTrack(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        if (fromIndex == toIndex) return
+        if (playlistId < 0L) return
+        val current = _uiState.value.detailPlaylist?.takeIf { it.id == playlistId }
+            ?: _uiState.value.playlists.firstOrNull { it.id == playlistId }
+            ?: return
+        if (fromIndex !in current.tracks.indices || toIndex !in current.tracks.indices) return
+        val reordered = current.tracks.toMutableList().apply { add(toIndex, removeAt(fromIndex)) }
+        _uiState.update { state ->
+            state.copy(
+                detailPlaylist = if (state.detailPlaylist?.id == playlistId) {
+                    state.detailPlaylist?.copy(tracks = reordered)
+                } else {
+                    state.detailPlaylist
+                },
+                playlists = state.playlists.map { playlist ->
+                    if (playlist.id == playlistId) playlist.copy(tracks = reordered) else playlist
+                },
+            )
+        }
+        viewModelScope.launch {
+            runCatching { playlistRepository.moveTrack(playlistId, fromIndex, toIndex) }
+                .getOrNull()?.let { saved ->
+                    _uiState.update { state ->
+                        state.copy(
+                            detailPlaylist = if (state.detailPlaylist?.id == playlistId) {
+                                saved
+                            } else {
+                                state.detailPlaylist
+                            },
+                            playlists = state.playlists.map { playlist ->
+                                if (playlist.id == playlistId) saved else playlist
+                            },
+                        )
+                    }
+                }
         }
     }
 
