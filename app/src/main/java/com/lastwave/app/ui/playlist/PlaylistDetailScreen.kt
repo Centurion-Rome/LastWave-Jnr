@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -146,7 +147,7 @@ enum class PlaylistTrackSort(val label: String) {
 private fun formatDate(millis: Long): String =
     SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(millis))
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistDetailScreen(
     playlistId: Long,
@@ -302,7 +303,7 @@ fun PlaylistDetailScreen(
                 .adaptiveContentWidth(maxWidth = 860.dp)
                 .align(Alignment.TopCenter),
         ) {
-            // Hero Header Section
+            // Hero Header Section (picture + title + actions scroll away)
             item(key = "hero_section") {
                 Column(
                     modifier = Modifier
@@ -310,13 +311,6 @@ fun PlaylistDetailScreen(
                         .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 150.dp)
                         .padding(horizontal = 4.dp),
                 ) {
-                    // Old-HiFi analog VU on top of the playlist hero.
-                    // Real bass when the PCM tap flows, simulated groove otherwise.
-                    com.lastwave.app.ui.common.AnalogVuMeter(
-                        isPlaying = playbackState.isPlaying,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                        level = com.lastwave.app.ui.common.rememberRealBassLevel(playbackState.isPlaying),
-                    )
                     // Big Bold Playlist Title (overlaid in hero)
                     Text(
                         text = playlist.title,
@@ -557,6 +551,14 @@ fun PlaylistDetailScreen(
 
                     Spacer(Modifier.height(6.dp))
                 }
+            }
+
+            // Old-HiFi analog VU below the picture, pinned while scrolling.
+            // Real bass when the PCM tap flows, simulated groove otherwise.
+            stickyHeader(key = "vu_meter", contentType = "vu_meter") { _ ->
+                com.lastwave.app.ui.common.StickyVuMeter(
+                    isPlaying = playbackState.isPlaying,
+                )
             }
 
             // Track items

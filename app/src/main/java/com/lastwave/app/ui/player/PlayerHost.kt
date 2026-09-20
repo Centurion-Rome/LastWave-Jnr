@@ -2787,6 +2787,13 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
     }
 
     Column(modifier) {
+        // Old-HiFi analog VU above the List, fixed (sticky) while the queue scrolls.
+        // Real bass when the PCM tap flows, simulated groove otherwise.
+        com.lastwave.app.ui.common.AnalogVuMeter(
+            isPlaying = state.isPlaying,
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+            level = com.lastwave.app.ui.common.rememberRealBassLevel(state.isPlaying),
+        )
         Row(
             Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,

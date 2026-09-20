@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -99,7 +100,7 @@ import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.ui.player.LocalMusicPlayer
 import com.lastwave.app.ui.player.PlayingWaveBars
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumDetailScreen(
     albumTitle: String,
@@ -405,6 +406,12 @@ fun AlbumDetailScreen(
                         }
                     }
 
+                    // Old-HiFi analog VU below the top picture, pinned while scrolling.
+                    stickyHeader(key = "vu_meter", contentType = "vu_meter") { _ ->
+                        com.lastwave.app.ui.common.StickyVuMeter(
+                            isPlaying = playbackState.isPlaying,
+                        )
+                    }
 
                     // 2. Tracklist Header
                     item(key = "tracklist_header") {

@@ -461,6 +461,34 @@ fun PlaybackVuMeter(
 }
 
 /**
+ * Sticky VU strip for LazyColumn [stickyHeader] slots (single playlist,
+ * artist songs, album songs).
+ *
+ * The opaque [MaterialTheme.colorScheme.background] is load-bearing: without
+ * it the track rows scrolling underneath would bleed through when the header
+ * pins to the top. Real bass when the PCM tap flows, simulated groove
+ * otherwise — same wiring as the playlists-overview strip.
+ */
+@Composable
+fun StickyVuMeter(
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    androidx.compose.foundation.layout.Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.background)
+            .padding(vertical = 4.dp),
+    ) {
+        AnalogVuMeter(
+            isPlaying = isPlaying,
+            modifier = Modifier.fillMaxWidth(),
+            level = rememberRealBassLevel(isPlaying),
+        )
+    }
+}
+
+/**
  * Real bass level from the decoded PCM stream, or null when no fresh data
  * flows (paused, fallback sink, Cast) so callers fall back to the simulated
  * groove: `level = rememberRealBassLevel(isPlaying)`.
