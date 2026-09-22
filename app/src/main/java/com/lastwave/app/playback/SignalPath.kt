@@ -54,6 +54,12 @@ data class SignalPathInput(
     val glitchCount: Long,
     val isPlaying: Boolean,
     val platformBitPerfectConfigured: Boolean = false,
+    /** True while usbdevfs exclusive output owns the DAC clock. */
+    val usbExclusiveActive: Boolean = false,
+    /** GET_CUR sample rate matches the requested exclusive rate. */
+    val exclusiveClockMatched: Boolean = false,
+    /** UAC Feature Unit volume is in use (PCM payload unscaled). */
+    val exclusiveHardwareVolume: Boolean = false,
 )
 
 /**
@@ -79,6 +85,7 @@ data class SignalPathReport(
     val driftPpm: Double?,
     val glitchCount: Long,
     val isPlaying: Boolean,
+    val usbExclusiveActive: Boolean = false,
 ) {
     companion object {
         fun initial() = SignalPathReport(
@@ -94,6 +101,7 @@ data class SignalPathReport(
             driftPpm = null,
             glitchCount = 0L,
             isPlaying = false,
+            usbExclusiveActive = false,
         )
     }
 }
@@ -106,8 +114,11 @@ fun AudioManager.mixerRateHz(): Int = runCatching {
 fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
     val checks = mutableListOf<PathCheck>()
 
-    // 1 — Source format.
+    // 1 — Source format. Exclusive usbdevfs is clocked by the decoded PCM
+    // rate, so a missing container/tag rate still uses the exclusive output
+    // rate rather than failing gold as "unknown".
     val src = i.sourceRateHz?.takeIf { it > 0 }
+        ?: i.appOutputRateHz.takeIf { it > 0 && i.usbExclusiveActive }
     val bitDepth = i.sourceBitDepth?.takeIf { it > 0 }
     if (src != null) {
         if (bitDepth != null) {
@@ -197,7 +208,13 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
     }
 
     // 5 — App gain staging (fades, ducking and software volume all scale here).
-    if (i.appVolume == 1f) {
+    if (i.usbExclusiveActive && i.exclusiveHardwareVolume) {
+        checks += PathCheck(
+            R.string.signal_label_appvol,
+            R.string.signal_detail_usb_hw_vol,
+            passed = true,
+        )
+    } else if (i.appVolume == 1f) {
         checks += PathCheck(
             R.string.signal_label_appvol,
             R.string.signal_detail_gain_unity,
@@ -214,7 +231,13 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
 
     // 6 — System gain staging (digital attenuation happens before the DAC,
     // unless the route uses fixed/hardware volume, which never scales PCM).
-    if (i.systemVolumeFixed) {
+    if (i.usbExclusiveActive && i.exclusiveHardwareVolume) {
+        checks += PathCheck(
+            R.string.signal_label_sysvol,
+            R.string.signal_detail_usb_hw_vol,
+            passed = true,
+        )
+    } else if (i.systemVolumeFixed) {
         checks += PathCheck(
             R.string.signal_label_sysvol,
             R.string.signal_detail_sysvol_hw,
@@ -241,11 +264,21 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
         )
     }
 
-    // 7 — Platform mixer (AudioFlinger resamples when rates differ).
+    // 7 — Platform mixer. Gold requires exclusive usbdevfs; an Android
+    // mixer BIT_PERFECT grant is never treated as verified bit-perfect.
     val plat = i.platformMixerRateHz.takeIf { it > 0 }
-    if (i.platformBitPerfectConfigured) {
-        checks += PathCheck(R.string.signal_label_mixer,
-            R.string.signal_detail_bit_perfect_configured, passed = true)
+    if (i.usbExclusiveActive) {
+        checks += PathCheck(
+            R.string.signal_label_mixer,
+            R.string.signal_detail_usb_exclusive,
+            passed = true,
+        )
+    } else if (i.platformBitPerfectConfigured) {
+        checks += PathCheck(
+            R.string.signal_label_mixer,
+            R.string.signal_detail_mixer_not_exclusive,
+            passed = false,
+        )
     } else if (app != null && plat != null) {
         if (plat == app) {
             checks += PathCheck(
@@ -284,6 +317,13 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
             listOf(dac.name),
             passed = false,
         )
+        i.usbExclusiveActive ->
+            checks += PathCheck(
+                R.string.signal_label_output,
+                R.string.signal_detail_usb_exclusive_route,
+                listOf(dac.name),
+                passed = true,
+            )
         app != null && dac.sampleRatesHz.isNotEmpty() && app in dac.sampleRatesHz ->
             checks += PathCheck(
                 R.string.signal_label_output,
@@ -306,36 +346,30 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
         )
     }
 
-    // 9 — Routing verification: requesting the DAC is not proof the platform
-    // granted it. Raw output requires the BIT_PERFECT grant on that route;
-    // otherwise Android still owns the stream (shared mixer hijack).
+    // 9 — Exclusive clock verification. Mixer routing is never gold.
     when {
-        dac == null -> checks += PathCheck(
-            R.string.signal_label_output,
-            R.string.signal_detail_no_dac,
-            passed = false,
-        )
-        !i.routedToDac -> checks += PathCheck(
-            R.string.signal_label_output,
-            R.string.signal_detail_not_routed,
-            listOf(dac.name),
-            passed = false,
-        )
-        !i.routeVerified -> checks += PathCheck(
+        !i.usbExclusiveActive -> checks += PathCheck(
             R.string.signal_label_output,
             R.string.signal_detail_route_unverified,
             passed = false,
         )
+        i.exclusiveClockMatched || i.routeVerified -> checks += PathCheck(
+            R.string.signal_label_output,
+            R.string.signal_detail_usb_clock_ok,
+            passed = true,
+        )
         else -> checks += PathCheck(
             R.string.signal_label_output,
-            R.string.signal_detail_bit_perfect_configured,
-            passed = true,
+            R.string.signal_detail_usb_clock_mismatch,
+            passed = false,
         )
     }
 
     return SignalPathReport(
         checks = checks,
-        bitPerfect = checks.all { it.passed },
+        bitPerfect = i.usbExclusiveActive &&
+            (i.exclusiveClockMatched || i.routeVerified) &&
+            checks.all { it.passed },
         sourceLabel = i.sourceLabel,
         sourceRateHz = src,
         appRateHz = app ?: 0,
@@ -344,6 +378,7 @@ fun evaluateSignalPath(i: SignalPathInput): SignalPathReport {
         driftPpm = i.driftPpm,
         glitchCount = i.glitchCount,
         isPlaying = i.isPlaying,
+        usbExclusiveActive = i.usbExclusiveActive,
     )
 }
 
@@ -361,11 +396,15 @@ class StreamHealthTracker {
 
     private var lastPositionMs = -1L
     private var lastWallMs = 0L
+    private var exclusiveOriginFrames = -1L
+    private var exclusiveOriginWallMs = 0L
 
     fun reset() {
         driftPpm = null
         lastPositionMs = -1L
         lastWallMs = 0L
+        exclusiveOriginFrames = -1L
+        exclusiveOriginWallMs = 0L
     }
 
     /**
@@ -389,13 +428,43 @@ class StreamHealthTracker {
         lastWallMs = wallMs
         if (wallDelta < 400L || wallDelta > 3_000L) return driftPpm
         if (kotlin.math.abs(posDelta - wallDelta) > 1_500L) {
-            // Seek (or a >1.5 s discontinuity): re-baseline, don't pollute PPM.
+            // DASH/FLAC timelines jump by seconds while audio keeps playing.
+            // Re-baseline (lastPosition already moved) but keep the last PPM.
+            // Clearing it here left lossless stuck on "measuring…".
             if (posDelta < -250L) glitchCount++
-            driftPpm = null
-            return null
+            return driftPpm
         }
-        if (wallDelta >= 800L && posDelta <= 0L) glitchCount++
+        if (posDelta <= 0L) {
+            if (wallDelta >= 800L) glitchCount++
+            return driftPpm
+        }
         val instant = (posDelta - wallDelta).toDouble() / wallDelta * 1_000_000.0
+        driftPpm = if (driftPpm == null) instant else driftPpm!! * 0.85 + instant * 0.15
+        return driftPpm
+    }
+
+    /**
+     * Exclusive usbdevfs clock vs wall. Do not reuse [sample]: lossless
+     * handleBuffer blocks for seconds inside USB write(), so the Java-visible
+     * frame count jumps >1.5 s and the ExoPlayer seek detector stuck drift
+     * on "measuring…". Compare cumulative frames to wall from a baseline.
+     */
+    fun sampleExclusive(framesWritten: Long, rateHz: Int, wallMs: Long, playing: Boolean): Double? {
+        if (!playing || rateHz <= 0 || framesWritten < 0L) {
+            exclusiveOriginFrames = -1L
+            return driftPpm
+        }
+        if (exclusiveOriginFrames < 0L || framesWritten < exclusiveOriginFrames) {
+            exclusiveOriginFrames = framesWritten
+            exclusiveOriginWallMs = wallMs
+            return driftPpm
+        }
+        val wallDelta = wallMs - exclusiveOriginWallMs
+        if (wallDelta < 500L) return driftPpm
+        val audioMs = (framesWritten - exclusiveOriginFrames).toDouble() * 1000.0 / rateHz.toDouble()
+        if (audioMs < 200.0) return driftPpm
+        val instant = ((audioMs - wallDelta) / wallDelta * 1_000_000.0)
+            .coerceIn(-50_000.0, 50_000.0)
         driftPpm = if (driftPpm == null) instant else driftPpm!! * 0.85 + instant * 0.15
         return driftPpm
     }

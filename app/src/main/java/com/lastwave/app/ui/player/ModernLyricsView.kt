@@ -10,6 +10,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,7 +49,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -111,22 +111,35 @@ fun ModernLyricsPanel(
     // Keyed on the whole track: videoId is null for local/search tracks,
     // and a null key would leak the previous song's smoothing state.
     var smoothedPositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
-    var basePositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
-    var lastSyncTime by remember(track) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
     LaunchedEffect(progress.positionMs, state.isPlaying) {
-        basePositionMs = progress.positionMs
-        lastSyncTime = SystemClock.elapsedRealtime()
-        smoothedPositionMs = progress.positionMs
+        val drift = kotlin.math.abs(smoothedPositionMs - progress.positionMs)
+        // Hard snap on seek (>250ms drift) or when stopped/paused
+        if (drift > 250 || !state.isPlaying) {
+            smoothedPositionMs = progress.positionMs
+        }
     }
 
     LaunchedEffect(state.isPlaying) {
         if (!state.isPlaying) return@LaunchedEffect
+        var lastFrameTime = SystemClock.elapsedRealtime()
         while (isActive) {
             withFrameMillis {
-                val elapsed = SystemClock.elapsedRealtime() - lastSyncTime
+                val now = SystemClock.elapsedRealtime()
+                val dt = (now - lastFrameTime).coerceIn(0L, 50L)
+                lastFrameTime = now
+
+                val target = progress.positionMs
                 val dur = progress.durationMs.takeIf { it > 0 } ?: state.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                smoothedPositionMs = (basePositionMs + elapsed).coerceIn(0L, dur)
+
+                var nextPos = smoothedPositionMs + dt
+                val drift = target - nextPos
+                if (kotlin.math.abs(drift) > 250) {
+                    nextPos = target
+                } else {
+                    nextPos += (drift * 0.15f).toLong()
+                }
+                smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
             }
         }
     }
@@ -315,7 +328,7 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
     val lineStart = timeMs.toInt()
     val lineEnd = if (durationMs > 0) (timeMs + durationMs).toInt()
     else if (syllables.isNotEmpty()) (syllables.last().timeMs + syllables.last().durationMs).toInt()
-    else lineStart + 1500
+    else lineStart + 4500  // reasonable fallback; backfilled by toSyncedLyrics
 
     val isLineRtl = isRtl || (isOverallRtl && (text.isBlank() || text == "♪"))
 
@@ -327,7 +340,12 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
         fun List<LyricSyllable>.toKaraokeSyllables(): List<KaraokeSyllable> {
             return mapIndexed { index, syl ->
                 val sStart = syl.timeMs.toInt()
-                val sEnd = (syl.timeMs + syl.durationMs).toInt().coerceAtLeast(sStart)
+                val minDur = if (syl.durationMs > 0) syl.durationMs.toInt() else {
+                    val nextSyl = getOrNull(index + 1)
+                    if (nextSyl != null && nextSyl.timeMs > syl.timeMs) (nextSyl.timeMs - syl.timeMs).toInt()
+                    else 150
+                }
+                val sEnd = (sStart + minDur).coerceAtLeast(sStart + 50)
                 val next = getOrNull(index + 1)
                 val separator = if (needsSpacing &&
                     index < lastIndex &&
@@ -345,12 +363,16 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
         }
 
         val mainSyllables = leadSyllables.toKaraokeSyllables()
+        val effectiveStart = if (mainSyllables.isNotEmpty()) minOf(lineStart, mainSyllables.first().start) else lineStart
+        val effectiveEnd = if (mainSyllables.isNotEmpty()) maxOf(lineEnd, mainSyllables.last().end) else lineEnd
+
         val accompaniment = if (bgSyllables.isNotEmpty()) {
-            val bgStart = bgSyllables.first().timeMs.toInt()
-            val bgEnd = (bgSyllables.last().timeMs + bgSyllables.last().durationMs).toInt().coerceAtLeast(bgStart)
+            val bgKaraokeSyllables = bgSyllables.toKaraokeSyllables()
+            val bgStart = bgKaraokeSyllables.first().start
+            val bgEnd = bgKaraokeSyllables.last().end.coerceAtLeast(bgStart + 50)
             listOf(
                 KaraokeLine.AccompanimentKaraokeLine(
-                    syllables = bgSyllables.toKaraokeSyllables(),
+                    syllables = bgKaraokeSyllables,
                     translation = null,
                     alignment = if (isLineRtl) KaraokeAlignment.Start else KaraokeAlignment.End,
                     start = bgStart,
@@ -367,14 +389,14 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
             translation = null,
             phonetic = transliteration,
             alignment = if (isLineRtl) KaraokeAlignment.End else KaraokeAlignment.Start,
-            start = lineStart,
-            end = lineEnd.coerceAtLeast(lineStart),
+            start = effectiveStart,
+            end = effectiveEnd.coerceAtLeast(effectiveStart + 100),
             accompanimentLines = accompaniment,
         )
     } else {
         SyncedLine(
             start = lineStart,
-            end = lineEnd.coerceAtLeast(lineStart),
+            end = lineEnd.coerceAtLeast(lineStart + 100),
             content = text,
             translation = transliteration,
         )
@@ -382,8 +404,22 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
 }
 
 private fun List<LyricLine>.toSyncedLyrics(title: String, artist: String, isOverallRtl: Boolean = false): SyncedLyrics {
+    // Backfill end times: for lines without explicit duration and no syllables,
+    // set duration to reach the next line's start (eliminates gaps/overlaps).
+    val backfilled = mapIndexed { i, line ->
+        if (line.durationMs <= 0 && line.syllables.isEmpty() && i < lastIndex) {
+            val nextStart = this[i + 1].timeMs
+            if (nextStart > line.timeMs) {
+                val gap = nextStart - line.timeMs
+                val dur = if (gap <= 6000L) gap else 4500L
+                line.copy(durationMs = dur)
+            } else line
+        } else if (line.durationMs <= 0 && line.syllables.isEmpty() && i == lastIndex) {
+            line.copy(durationMs = 4500L)
+        } else line
+    }
     return SyncedLyrics(
-        lines = map { it.toISyncedLine(isOverallRtl) },
+        lines = backfilled.map { it.toISyncedLine(isOverallRtl) },
         title = title,
         artists = listOf(Artist(type = "artist", name = artist)),
     )
@@ -522,7 +558,7 @@ private fun ModernLyricsControls(
                     label = "playerTabScale",
                 )
                 LiquidGlassSurface(
-                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current),
+                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, interactionSource = playerInteraction),
                     onClick = onToggleFullscreen,
                     interactionSource = playerInteraction,
                     shape = CircleShape,
@@ -550,10 +586,20 @@ private fun ModernLyricsControls(
 
         if (isFullscreen) return@Column
 
-        var dragging by remember { mutableStateOf(false) }
-        var dragValue by remember { mutableFloatStateOf(0f) }
+        // Current-gesture value only; null = finger off, show live position.
+        // Keyed by track so a previous song's drag can never leak into this
+        // one, and nullable so a press without movement seeks nowhere while a
+        // gesture that ends without onValueChangeFinished can't pin the bar.
+        val lyricsTrackKey = state.current?.let { it.videoId ?: "${it.artist}|${it.title}" }
+        val seekInteraction = remember(lyricsTrackKey) { MutableInteractionSource() }
+        val frameworkDragging by seekInteraction.collectIsDraggedAsState()
+        var dragValue by remember(lyricsTrackKey) { mutableStateOf<Float?>(null) }
+        LaunchedEffect(frameworkDragging, lyricsTrackKey) {
+            if (!frameworkDragging) dragValue = null
+        }
         val end = totalDurationMs.coerceAtLeast(1).toFloat()
-        val shown = if (dragging) dragValue else currentPositionMs.coerceIn(0, totalDurationMs.coerceAtLeast(0)).toFloat()
+        val shown = (dragValue ?: currentPositionMs.coerceIn(0, totalDurationMs.coerceAtLeast(0)).toFloat())
+            .coerceIn(0f, end)
 
         if (wavySeekbarEnabled) {
             WavySeekBar(
@@ -568,12 +614,18 @@ private fun ModernLyricsControls(
             )
         } else {
             PlayerProgressSlider(
-                value = shown.coerceIn(0f, end),
-                onValueChange = { dragging = true; dragValue = it },
-                onValueChangeFinished = { player.seekTo(dragValue.toLong()); dragging = false },
+                value = shown,
+                onValueChange = { dragValue = it },
+                onValueChangeFinished = {
+                    // Commit only this gesture's value; no value = no seek.
+                    val target = dragValue?.toLong()
+                    dragValue = null
+                    if (target != null) player.seekTo(target)
+                },
                 valueRange = 0f..end,
                 enabled = totalDurationMs > 0,
                 modifier = Modifier.fillMaxWidth(),
+                interactionSource = seekInteraction,
             )
         }
 

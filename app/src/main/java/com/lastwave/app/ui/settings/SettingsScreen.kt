@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Language
@@ -150,12 +151,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
-import com.lastwave.app.ui.theme.LocalLiquidGlass
-import com.lastwave.app.ui.theme.LocalLiquidGlassOverlayBackdrop
-import com.lastwave.app.ui.theme.LiquidGlassPreset
-import com.lastwave.app.ui.theme.liquidGlassContainerColor
-import com.lastwave.app.ui.theme.LiquidGlassSurface
-import com.lastwave.app.ui.theme.liquidGlassChrome
+
 import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.R
 import com.lastwave.app.data.local.AccentMode
@@ -164,6 +160,8 @@ import com.lastwave.app.data.local.EQ_BAND_FREQS_HZ
 import com.lastwave.app.data.local.EQ_MAX_GAIN_DB
 import com.lastwave.app.data.local.EqualizerPresets
 import com.lastwave.app.data.local.EqualizerSettings
+import com.lastwave.app.playback.ClarityPresets
+import com.lastwave.app.playback.LoudnessMode
 import com.lastwave.app.data.local.eqBandLabel
 import com.lastwave.app.ui.common.ConnectedButtonGroup
 import com.lastwave.app.ui.common.ConnectedButtonItem
@@ -281,6 +279,8 @@ fun SettingsScreen(
     val ytChannels by viewModel.ytChannels.collectAsStateWithLifecycle()
     val ytChannelsLoading by viewModel.ytChannelsLoading.collectAsStateWithLifecycle()
     val eq by viewModel.equalizer.collectAsStateWithLifecycle()
+    val usbExclusiveEnabled by viewModel.usbExclusiveEnabled.collectAsStateWithLifecycle()
+    val loudness by viewModel.loudness.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
     val isLastFmConnected by viewModel.isLastFmConnected.collectAsStateWithLifecycle()
     val hasApiKey by viewModel.hasApiKey.collectAsStateWithLifecycle()
@@ -306,6 +306,8 @@ fun SettingsScreen(
     var showEqSheet by remember { mutableStateOf(false) }
     var showLyricsAnimationSheet by remember { mutableStateOf(false) }
     var showLyricsProviderDialog by remember { mutableStateOf(false) }
+    var showLoudnessDialog by remember { mutableStateOf(false) }
+    var showClarityPresetDialog by remember { mutableStateOf(false) }
     var showSyncPlaylistsSheet by remember { mutableStateOf(false) }
     var showYtLibraryVisibilitySheet by remember { mutableStateOf(false) }
     var showYtChannelSheet by remember { mutableStateOf(false) }
@@ -1056,6 +1058,70 @@ fun SettingsScreen(
 
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SectionLabel("Output & Loudness")
+                    val clarityPreset = remember(misc.clarityPreset) { ClarityPresets.fromIndex(misc.clarityPreset) }
+                    val loudnessSubtitle = when (loudness.mode) {
+                        LoudnessMode.TRACK -> "Track \u2022 Match every track to -14 LUFS"
+                        LoudnessMode.ALBUM -> "Album \u2022 Keep intentional album dynamics"
+                        else -> "Off \u2022 Play tagged tracks at original level"
+                    }
+                    SettingsGroup(rowCount = 4) { index, position ->
+                        when (index) {
+                            0 -> SettingsToggleCard(
+                                icon = Icons.Filled.Usb,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = "USB Exclusive Output",
+                                subtitle = if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+                                    "Requires Android 10 or newer"
+                                } else if (usbExclusiveEnabled || misc.isBitPerfectEnabled) {
+                                    "Direct usbdevfs to the DAC \u2022 Bit-Perfect engages this automatically"
+                                } else {
+                                    "Off \u2022 Needs a USB DAC and Bit-Perfect (or this toggle)"
+                                },
+                                checked = usbExclusiveEnabled,
+                                onCheckedChange = viewModel::setUsbExclusiveEnabled,
+                                position = position,
+                            )
+                            1 -> SettingsActionCard(
+                                icon = Icons.Filled.VolumeUp,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = "Loudness Normalization",
+                                subtitle = loudnessSubtitle,
+                                onClick = { showLoudnessDialog = true },
+                                position = position,
+                            )
+                            2 -> SettingsActionCard(
+                                icon = Icons.Filled.Tune,
+                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = "Clarity Output Preset",
+                                subtitle = "${clarityPreset.displayName} \u2022 ${clarityPreset.description}",
+                                onClick = { showClarityPresetDialog = true },
+                                position = position,
+                            )
+                            else -> SettingsToggleCard(
+                                icon = Icons.Filled.GraphicEq,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = "Clarity Spatial Bypass",
+                                subtitle = if (misc.clarityAtmosBypass) {
+                                    "Clarity bypasses on multichannel/spatial sources"
+                                } else {
+                                    "Off \u2022 Clarity processes every source"
+                                },
+                                checked = misc.clarityAtmosBypass,
+                                onCheckedChange = viewModel::setClarityAtmosBypass,
+                                position = position,
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_imports))
                     SettingsGroup(rowCount = 2) { index, position ->
                         when (index) {
@@ -1531,6 +1597,28 @@ fun SettingsScreen(
         )
     }
 
+    if (showLoudnessDialog) {
+        LoudnessModeDialog(
+            current = loudness.mode,
+            onSelect = {
+                viewModel.setLoudnessMode(it)
+                showLoudnessDialog = false
+            },
+            onDismiss = { showLoudnessDialog = false },
+        )
+    }
+
+    if (showClarityPresetDialog) {
+        ClarityPresetDialog(
+            currentIndex = misc.clarityPreset,
+            onSelect = {
+                viewModel.setClarityPreset(it)
+                showClarityPresetDialog = false
+            },
+            onDismiss = { showClarityPresetDialog = false },
+        )
+    }
+
     // -- Selective Playlist Sync sheet --
     if (showSyncPlaylistsSheet) {
         SyncPlaylistsSheet(
@@ -1953,15 +2041,12 @@ private fun ThemeModeSelectorCard(
     position: GroupPosition = GroupPosition.SINGLE,
 ) {
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
 
     Card(
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .liquidGlassChrome(shape, liquidGlass),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
@@ -2028,22 +2113,20 @@ private fun SettingsToggleCard(
     val interactionSource = remember { MutableInteractionSource() }
     val scale = rememberPressScale(interactionSource)
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
 
     Card(
         onClick = { if (enabled) onCheckedChange(!checked) },
         shape = shape,
         enabled = enabled,
         colors = CardDefaults.cardColors(
-            containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh),
-            disabledContainerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f)),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         interactionSource = interactionSource,
         modifier = Modifier
             .fillMaxWidth()
-            .scale(if (enabled) scale else 1f)
-            .liquidGlassChrome(shape, liquidGlass),
+            .scale(if (enabled) scale else 1f),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
@@ -2099,14 +2182,11 @@ private fun SettingsToggleCard(
 private fun ScrobbleThresholdRow(percent: Int, onPercentChange: (Int) -> Unit, position: GroupPosition = GroupPosition.SINGLE) {
     var sliderValue by remember(percent) { mutableStateOf(percent.coerceIn(25, 90).toFloat()) }
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
     Card(
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .liquidGlassChrome(shape, liquidGlass),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2146,7 +2226,6 @@ private fun CrossfadeDurationRow(
         if (!isDragging) sliderValue = seconds.coerceIn(1, 12).toFloat()
     }
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
 
     val blendStyle = when (sliderValue.roundToInt()) {
         in 1..2 -> "Quick DJ overlap"
@@ -2157,11 +2236,9 @@ private fun CrossfadeDurationRow(
 
     Card(
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .liquidGlassChrome(shape, liquidGlass),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2239,18 +2316,16 @@ private fun SettingsActionCard(
     val scale = rememberPressScale(interactionSource)
     val titleColor = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
 
     Card(
         onClick = onClick,
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         interactionSource = interactionSource,
         modifier = Modifier
             .fillMaxWidth()
-            .scale(scale)
-            .liquidGlassChrome(shape, liquidGlass),
+            .scale(scale),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
@@ -2279,15 +2354,13 @@ private fun YouTubeAccountRow(
     position: GroupPosition,
 ) {
     val shape = groupShape(position)
-    val liquidGlass = LocalLiquidGlass.current
     Card(
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = liquidGlassContainerColor(MaterialTheme.colorScheme.surfaceContainerHigh)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize()
-            .liquidGlassChrome(shape, liquidGlass),
+            .animateContentSize(),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
@@ -4047,6 +4120,128 @@ private fun LyricsProviderDialog(
     )
 }
 
+private fun loudnessModeTitle(mode: LoudnessMode): String = when (mode) {
+    LoudnessMode.TRACK -> "Track"
+    LoudnessMode.ALBUM -> "Album"
+    else -> "Off"
+}
+
+private fun loudnessModeSubtitle(mode: LoudnessMode): String = when (mode) {
+    LoudnessMode.TRACK -> "Match every track to -14 LUFS (needs ReplayGain tags)"
+    LoudnessMode.ALBUM -> "Keep intentional album dynamics (falls back to track tags)"
+    else -> "Play tracks at their original level"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LoudnessModeDialog(
+    current: LoudnessMode,
+    onSelect: (LoudnessMode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Loudness Normalization") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Evens out volume jumps between tracks. Bypassed in Bit-Perfect and USB exclusive modes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                LoudnessMode.entries.forEach { mode ->
+                    val selected = mode == current
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onSelect(mode) }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected, onClick = { onSelect(mode) })
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                loudnessModeTitle(mode),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                            )
+                            Text(
+                                loudnessModeSubtitle(mode),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
+        },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ClarityPresetDialog(
+    currentIndex: Int,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clarity Output Preset") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Tunes the Studio Master Clarity chain to the output. Reference is the unmodified shipping curve.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                ClarityPresets.ALL.forEach { preset ->
+                    val selected = preset.index == currentIndex
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onSelect(preset.index) }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected, onClick = { onSelect(preset.index) })
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                preset.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                            )
+                            Text(
+                                preset.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
+        },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LyricsAnimationSheet(
@@ -4060,21 +4255,11 @@ private fun LyricsAnimationSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
-    val liquidGlass = LocalLiquidGlass.current
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        modifier = Modifier.liquidGlassChrome(
-            RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            liquidGlass,
-            LiquidGlassPreset.ModalSheet,
-            LocalLiquidGlassOverlayBackdrop.current,
-        ),
-        containerColor = liquidGlassContainerColor(
-            MaterialTheme.colorScheme.surfaceContainer,
-            backdrop = LocalLiquidGlassOverlayBackdrop.current,
-        ),
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
     ) {
         Column(
@@ -4140,20 +4325,13 @@ private fun LyricsAnimationSheet(
                 versions.forEach { (ver, label) ->
                     val isVerSelected = ver == version
                     val chipShape = RoundedCornerShape(14.dp)
-                    LiquidGlassSurface(
-                        glassModifier = Modifier.liquidGlassChrome(chipShape, liquidGlass),
+                    Surface(
                         onClick = {
                             haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                             onSelectVersion(ver)
                         },
                         shape = chipShape,
-                        color = liquidGlassContainerColor(if (isVerSelected) {
-                            if (liquidGlass) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
-                            else MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.60f)
-                            else MaterialTheme.colorScheme.surfaceContainerHigh
-                        }),
+                        color = if (isVerSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
                         modifier = Modifier
                             .weight(1f)
                             .clip(chipShape),
@@ -4190,17 +4368,14 @@ private fun LyricsAnimationSheet(
 
                         Surface(
                             shape = cardShape,
-                            color = liquidGlassContainerColor(if (isSelected) {
-                                if (liquidGlass) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
-                                else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.70f)
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.70f)
                             } else {
-                                if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.90f)
-                                else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.50f)
-                            }),
+                                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.50f)
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(cardShape)
-                                .liquidGlassChrome(cardShape, liquidGlass)
                                 .clickable {
                                     haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                                     onSelect(anim)
@@ -4236,18 +4411,13 @@ private fun LyricsAnimationSheet(
                                         text = anim.title,
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
-                                        color = if (isSelected && liquidGlass) MaterialTheme.colorScheme.onPrimaryContainer
-                                        else if (isSelected) MaterialTheme.colorScheme.primary
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurface,
                                     )
                                     Text(
                                         text = anim.description,
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = if (isSelected && liquidGlass) {
-                                            MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f)
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }
@@ -4257,9 +4427,8 @@ private fun LyricsAnimationSheet(
             } else {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = liquidGlassContainerColor(if (liquidGlass) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.70f)
-                    else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f)),
-                    modifier = Modifier.fillMaxWidth().liquidGlassChrome(RoundedCornerShape(18.dp), liquidGlass),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.40f),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(
                         modifier = Modifier.padding(20.dp),

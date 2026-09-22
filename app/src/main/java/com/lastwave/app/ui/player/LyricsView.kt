@@ -14,7 +14,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -56,12 +59,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import com.lastwave.app.ui.theme.LiquidGlassSurface
 import com.lastwave.app.ui.theme.liquidGlassChrome
@@ -129,23 +132,36 @@ fun LyricsPanel(
     )
 
     // High-precision frame-level monotonic position clock for 60/120fps bit-perfect vocal sync
-    var smoothedPositionMs by remember(track.videoId) { mutableLongStateOf(progress.positionMs) }
-    var basePositionMs by remember(track.videoId) { mutableLongStateOf(progress.positionMs) }
-    var lastSyncTime by remember(track.videoId) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var smoothedPositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
 
     LaunchedEffect(progress.positionMs, state.isPlaying) {
-        basePositionMs = progress.positionMs
-        lastSyncTime = SystemClock.elapsedRealtime()
-        smoothedPositionMs = progress.positionMs
+        val drift = kotlin.math.abs(smoothedPositionMs - progress.positionMs)
+        // Hard snap on seek (>250ms drift) or when stopped/paused
+        if (drift > 250 || !state.isPlaying) {
+            smoothedPositionMs = progress.positionMs
+        }
     }
 
     LaunchedEffect(state.isPlaying) {
         if (!state.isPlaying) return@LaunchedEffect
+        var lastFrameTime = SystemClock.elapsedRealtime()
         while (isActive) {
             withFrameMillis {
-                val elapsed = SystemClock.elapsedRealtime() - lastSyncTime
+                val now = SystemClock.elapsedRealtime()
+                val dt = (now - lastFrameTime).coerceIn(0L, 50L)
+                lastFrameTime = now
+
+                val target = progress.positionMs
                 val dur = progress.durationMs.takeIf { it > 0 } ?: state.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                smoothedPositionMs = (basePositionMs + elapsed).coerceIn(0L, dur)
+
+                var nextPos = smoothedPositionMs + dt
+                val drift = target - nextPos
+                if (kotlin.math.abs(drift) > 250) {
+                    nextPos = target
+                } else {
+                    nextPos += (drift * 0.15f).toLong()
+                }
+                smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
             }
         }
     }
@@ -269,10 +285,34 @@ private fun SyncedLyricsList(
         else meaningfulLines.count { it.isRtl } > meaningfulLines.size / 2
     }
 
-    // Active line detection: Exact millisecond vocal onset matching
-    val activeIndex by remember(lines, currentPositionMs) {
+    // Active line detection: range-aware matching without per-frame derivedStateOf reallocations
+    val activeIndex by remember(lines) {
         androidx.compose.runtime.derivedStateOf {
-            lines.indexOfLast { it.timeMs <= currentPositionMs }
+            val pos = currentPositionMs
+            var match = -1
+            for (idx in lines.indices.reversed()) {
+                val line = lines[idx]
+                val nextStart = lines.getOrNull(idx + 1)?.timeMs
+                val effectiveDuration = when {
+                    line.durationMs > 0 -> line.durationMs
+                    line.syllables.isNotEmpty() -> {
+                        val lastSyl = line.syllables.last()
+                        (lastSyl.timeMs + lastSyl.durationMs - line.timeMs).coerceAtLeast(1000L)
+                    }
+                    nextStart != null && nextStart > line.timeMs -> {
+                        val gap = nextStart - line.timeMs
+                        if (gap <= 6000L) gap else 4500L
+                    }
+                    else -> 5000L
+                }
+                val end = line.timeMs + effectiveDuration
+                if (pos >= line.timeMs && pos < end) {
+                    match = idx
+                    break
+                }
+            }
+            if (match >= 0) match
+            else lines.indexOfLast { it.timeMs <= pos }
         }
     }
 
@@ -283,15 +323,19 @@ private fun SyncedLyricsList(
     LaunchedEffect(activeIndex, isPlaying) {
         val timeSinceUserScroll = System.currentTimeMillis() - userScrolledTime
         if (timeSinceUserScroll > 2200L && activeIndex in lines.indices) {
-            val scrollOffset = when (animationStyle) {
-                LyricsAnimation.APPLE_ZOOM -> -210
-                LyricsAnimation.CINEMATIC_BLUR -> -190
-                else -> -180
+            runCatching {
+                val layoutInfo = listState.layoutInfo
+                val viewportHeight = layoutInfo.viewportSize.height
+                val targetItem = layoutInfo.visibleItemsInfo.find { it.index == activeIndex }
+                if (targetItem != null && viewportHeight > 0) {
+                    val targetY = viewportHeight / 3
+                    val delta = targetItem.offset - targetY
+                    listState.animateScrollBy(delta.toFloat())
+                } else {
+                    val targetIndex = (activeIndex - 1).coerceAtLeast(0)
+                    listState.animateScrollToItem(index = targetIndex, scrollOffset = 0)
+                }
             }
-            listState.animateScrollToItem(
-                index = activeIndex,
-                scrollOffset = scrollOffset,
-            )
         }
     }
 
@@ -534,18 +578,13 @@ private fun SyncedLyricsList(
                             vertical = if (isActive) 10.dp else 8.dp,
                         ),
                 ) {
-                    val fontStyle = if (isActive) {
-                        MaterialTheme.typography.headlineSmall.copy(
-                            fontWeight = if (animationStyle == LyricsAnimation.APPLE_ZOOM) FontWeight.Black else FontWeight.ExtraBold,
-                            letterSpacing = (-0.3).sp,
-                            lineHeight = if (animationStyle == LyricsAnimation.APPLE_ZOOM) 38.sp else 34.sp,
-                        )
-                    } else {
-                        MaterialTheme.typography.titleLarge.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 30.sp,
-                        )
-                    }
+                    val fontStyle = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = if (isActive) {
+                            if (animationStyle == LyricsAnimation.APPLE_ZOOM) FontWeight.Black else FontWeight.ExtraBold
+                        } else FontWeight.SemiBold,
+                        letterSpacing = (-0.2).sp,
+                        lineHeight = 32.sp,
+                    )
 
                     WordByWordLyricLine(
                         line = line,
@@ -581,6 +620,11 @@ private fun WordByWordLyricLine(
     modifier: Modifier = Modifier,
 ) {
     val lineLayoutDirection = if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+    val lineColor by animateColorAsState(
+        targetValue = if (isActive) activeColor else inactiveColor,
+        animationSpec = tween(220),
+        label = "lineColor",
+    )
     CompositionLocalProvider(LocalLayoutDirection provides lineLayoutDirection) {
         if (!line.hasSyllables || !isActive) {
             Column(
@@ -590,7 +634,7 @@ private fun WordByWordLyricLine(
                 Text(
                     text = line.text.ifBlank { "♪" },
                     style = fontStyle,
-                    color = if (isActive) activeColor else inactiveColor,
+                    color = lineColor,
                     textAlign = TextAlign.Start,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -635,9 +679,11 @@ private fun WordByWordLyricLine(
                 val needsSpacing = line.text.contains(' ') || line.text.contains('\u00A0')
                 line.syllables.forEachIndexed { sIndex, syllable ->
                     val sylStart = syllable.timeMs
-                    val sylEnd = syllable.timeMs + syllable.durationMs
+                    val minDur = if (syllable.durationMs > 0) syllable.durationMs else 150L
+                    val sylEnd = sylStart + minDur
                     val isSyllableActive = currentPositionMs in sylStart until sylEnd
                     val isSyllablePast = currentPositionMs >= sylEnd
+
                     val nextSyllable = line.syllables.getOrNull(sIndex + 1)
                     val separator = if (needsSpacing &&
                         sIndex < line.syllables.lastIndex &&
@@ -693,18 +739,18 @@ private fun WordByWordLyricLine(
                     )
 
                     val sylAlphaTarget = when {
-                        isSyllableActive -> 1f
-                        isSyllablePast -> 0.96f
+                        isSyllableActive -> 1.0f
+                        isSyllablePast -> 0.94f
                         else -> when (animationStyle) {
                             LyricsAnimation.CINEMATIC_BLUR -> 0.28f
                             LyricsAnimation.APPLE_ZOOM -> 0.34f
                             LyricsAnimation.MINIMAL_WAVE -> 0.52f
-                            else -> 0.40f
+                            else -> 0.44f
                         }
                     }
                     val sylAlpha by animateFloatAsState(
                         targetValue = sylAlphaTarget,
-                        animationSpec = tween(60),
+                        animationSpec = tween(90),
                         label = "sylAlpha_${sIndex}",
                     )
 
@@ -716,9 +762,9 @@ private fun WordByWordLyricLine(
                                 accentColor
                             }
                             isSyllablePast -> activeColor
-                            else -> inactiveColor.copy(alpha = 0.40f)
+                            else -> inactiveColor.copy(alpha = 0.44f)
                         },
-                        animationSpec = tween(80),
+                        animationSpec = tween(90),
                         label = "sylColor_${sIndex}",
                     )
 
@@ -896,7 +942,7 @@ private fun LyricsPlaybackControls(
                     label = "playerTabScale",
                 )
                 LiquidGlassSurface(
-                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current),
+                    glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, interactionSource = playerInteraction),
                     onClick = onToggleFullscreen,
                     interactionSource = playerInteraction,
                     shape = CircleShape,
@@ -924,10 +970,20 @@ private fun LyricsPlaybackControls(
 
         if (isFullscreen) return@Column
 
-        var dragging by remember { mutableStateOf(false) }
-        var dragValue by remember { mutableFloatStateOf(0f) }
+        // Current-gesture value only; null = finger off, show live position.
+        // Keyed by track so a previous song's drag can never leak into this
+        // one, and nullable so a press without movement seeks nowhere while a
+        // gesture that ends without onValueChangeFinished can't pin the bar.
+        val lyricsTrackKey = state.current?.let { it.videoId ?: "${it.artist}|${it.title}" }
+        val seekInteraction = remember(lyricsTrackKey) { MutableInteractionSource() }
+        val frameworkDragging by seekInteraction.collectIsDraggedAsState()
+        var dragValue by remember(lyricsTrackKey) { mutableStateOf<Float?>(null) }
+        LaunchedEffect(frameworkDragging, lyricsTrackKey) {
+            if (!frameworkDragging) dragValue = null
+        }
         val end = totalDurationMs.coerceAtLeast(1).toFloat()
-        val shown = if (dragging) dragValue else currentPositionMs.coerceIn(0, totalDurationMs.coerceAtLeast(0)).toFloat()
+        val shown = (dragValue ?: currentPositionMs.coerceIn(0, totalDurationMs.coerceAtLeast(0)).toFloat())
+            .coerceIn(0f, end)
 
         if (wavySeekbarEnabled) {
             WavySeekBar(
@@ -942,12 +998,18 @@ private fun LyricsPlaybackControls(
             )
         } else {
             PlayerProgressSlider(
-                value = shown.coerceIn(0f, end),
-                onValueChange = { dragging = true; dragValue = it },
-                onValueChangeFinished = { player.seekTo(dragValue.toLong()); dragging = false },
+                value = shown,
+                onValueChange = { dragValue = it },
+                onValueChangeFinished = {
+                    // Commit only this gesture's value; no value = no seek.
+                    val target = dragValue?.toLong()
+                    dragValue = null
+                    if (target != null) player.seekTo(target)
+                },
                 valueRange = 0f..end,
                 enabled = totalDurationMs > 0,
                 modifier = Modifier.fillMaxWidth(),
+                interactionSource = seekInteraction,
             )
         }
 
@@ -1030,5 +1092,29 @@ private fun LyricsPlaybackControls(
                 color = Color.White.copy(alpha = 0.85f),
             )
         }
+    }
+}
+
+/**
+ * Animated pixel scroll for [LazyListState], which only ships instant
+ * [LazyListState.scrollBy] and indexed [LazyListState.animateScrollToItem].
+ * Ease-out-cubic frame loop so the active-line follow stays smooth instead
+ * of jumping. Callers already guard with runCatching.
+ */
+private suspend fun LazyListState.animateScrollBy(pixels: Float) {
+    if (pixels == 0f) return
+    var consumed = 0f
+    var startNanos = -1L
+    var done = false
+    while (!done) {
+        val target = withFrameNanos { now ->
+            if (startNanos < 0L) startNanos = now
+            val t = ((now - startNanos) / 350_000_000f).coerceIn(0f, 1f)
+            done = t >= 1f
+            val eased = 1f - (1f - t) * (1f - t) * (1f - t)
+            pixels * eased
+        }
+        val delta = target - consumed
+        consumed += delta - scrollBy(delta)
     }
 }

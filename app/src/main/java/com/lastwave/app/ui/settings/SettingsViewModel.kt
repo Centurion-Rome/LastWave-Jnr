@@ -90,6 +90,7 @@ class SettingsViewModel @Inject constructor(
     private val fileExportHelper: FileExportHelper,
     private val scrobblerPreferences: ScrobblerPreferences,
     private val equalizerPreferences: com.lastwave.app.data.local.EqualizerPreferences,
+    private val loudnessPrefs: com.lastwave.app.playback.LoudnessPrefs,
     private val ytAuthManager: com.lastwave.app.data.ytmusic.YtMusicAuthManager,
     private val ytMusicSyncManager: com.lastwave.app.data.ytmusic.YtMusicSyncManager,
     private val ytMusicPreferences: com.lastwave.app.data.ytmusic.YtMusicPreferences,
@@ -417,6 +418,7 @@ class SettingsViewModel @Inject constructor(
         launchSettingsAction("update Bit-Perfect mode") {
             applyNativeAudio { it.setBitPerfect(enabled) }
             settingsPreferences.setBitPerfectEnabled(enabled)
+            com.lastwave.app.playback.usb.UsbExclusivePrefs.setEnabled(context, enabled)
             if (enabled) {
                 // When Bit-Perfect is turned on, automatically turn off Studio Master Clarity
                 settingsPreferences.setStudioMasterClarity(false)
@@ -424,6 +426,53 @@ class SettingsViewModel @Inject constructor(
             }
         }
     }
+
+    // ── USB exclusive output (direct DAC, default OFF) ──
+
+    val usbExclusiveEnabled: StateFlow<Boolean> =
+        com.lastwave.app.playback.usb.UsbExclusivePrefs.enabledFlow(context)
+            .withSettingsFallback("USB exclusive output", false)
+            .stateIn(viewModelScope, SettingsSharing, false)
+
+    fun setUsbExclusiveEnabled(enabled: Boolean) = launchSettingsAction("update USB exclusive output") {
+        if (enabled && android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            _uiState.update { it.copy(toastMessage = "USB exclusive needs Android 10 or newer") }
+            return@launchSettingsAction
+        }
+        com.lastwave.app.playback.usb.UsbExclusivePrefs.setEnabled(context, enabled)
+        if (enabled) {
+            applyNativeAudio { it.setBitPerfect(true) }
+            settingsPreferences.setBitPerfectEnabled(true)
+            settingsPreferences.setStudioMasterClarity(false)
+            applyNativeAudio { it.setStudioMasterClarity(false) }
+            _uiState.update { it.copy(toastMessage = "USB exclusive on — Bit-Perfect will use usbdevfs when a DAC is granted") }
+        }
+    }
+
+    // ── Clarity output preset + spatial bypass ──
+
+    fun setClarityPreset(preset: Int) = launchSettingsAction("update clarity preset") {
+        val safe = preset.coerceIn(0, 3)
+        applyNativeAudio { it.setClarityPreset(com.lastwave.app.playback.ClarityPresets.fromIndex(safe)) }
+        settingsPreferences.setClarityPreset(safe)
+    }
+
+    fun setClarityAtmosBypass(enabled: Boolean) = launchSettingsAction("update clarity spatial bypass") {
+        applyNativeAudio { it.setClarityAtmosBypass(enabled) }
+        settingsPreferences.setClarityAtmosBypass(enabled)
+    }
+
+    // ── Loudness normalization (ReplayGain, default OFF) ──
+
+    val loudness: StateFlow<com.lastwave.app.playback.LoudnessSettings> = loudnessPrefs.settings
+        .withSettingsFallback("loudness normalization", com.lastwave.app.playback.LoudnessSettings())
+        .stateIn(viewModelScope, SettingsSharing, com.lastwave.app.playback.LoudnessSettings())
+
+    fun setLoudnessMode(mode: com.lastwave.app.playback.LoudnessMode) =
+        launchSettingsAction("update loudness mode") { loudnessPrefs.setMode(mode) }
+
+    fun setLoudnessPreamp(preampDb: Float) =
+        launchSettingsAction("update loudness preamp") { loudnessPrefs.setPreampDb(preampDb) }
     fun setLyricsUiVersion(version: LyricsUiVersion) = launchSettingsAction("update lyrics UI version") { settingsPreferences.setLyricsUiVersion(version) }
     fun setWordByWordLyrics(enabled: Boolean) = launchSettingsAction("update word-by-word lyrics") { settingsPreferences.setWordByWordLyrics(enabled) }
     fun setLyricsAnimation(animation: com.lastwave.app.data.local.LyricsAnimation) = launchSettingsAction("update lyrics animation") { settingsPreferences.setLyricsAnimation(animation) }

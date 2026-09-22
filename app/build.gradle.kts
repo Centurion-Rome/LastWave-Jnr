@@ -40,6 +40,18 @@ android {
             if (!fromGradle.isNullOrBlank()) return fromGradle.trim().replace("\r", "").replace("\n", "").replace("\"", "").replace("\\", "")
             val fromLocal = localProps.getProperty(key)
             if (!fromLocal.isNullOrBlank()) return fromLocal.trim().replace("\r", "").replace("\n", "").replace("\"", "").replace("\\", "")
+            val dotEnv = rootProject.file(".env")
+            if (dotEnv.isFile) {
+                dotEnv.useLines { lines ->
+                    for (line in lines) {
+                        val trimmed = line.trim()
+                        if (trimmed.startsWith("$key=")) {
+                            val v = trimmed.substringAfter("=").trim().replace("\"", "").replace("\\", "")
+                            if (v.isNotBlank()) return v
+                        }
+                    }
+                }
+            }
         }
         return ""
     }
@@ -48,29 +60,12 @@ android {
         applicationId = "com.lastwave.app"
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
         targetSdk = 35
-        versionCode = 18
-        versionName = "4.1.1"
+        versionCode = 20
+        versionName = "4.2.0"
 
-        val secretMask = listOf(0x5A, 0x3F, 0x7E, 0x1B, 0x92, 0x4C, 0xA1, 0x6D)
-        fun obfuscateSecret(plainText: String): String {
-            if (plainText.isEmpty()) return "new byte[] {}"
-            val bytes = plainText.toByteArray(Charsets.UTF_8)
-            val obfuscated = bytes.mapIndexed { idx, b -> (b.toInt() xor secretMask[idx % secretMask.size]).toByte() }
-            return "new byte[] { " + obfuscated.joinToString(", ") { "(byte) $it" } + " }"
-        }
-        val maskLiteral = "new byte[] { " + secretMask.joinToString(", ") { "(byte) $it" } + " }"
-
-        // Provider-module code key (AES-256, base64 of 32 bytes). Provisioned
-        // per build via env / gradle property / local.properties / .env as
-        // PROVIDER_MODULE_KEY.
-        val providerModuleKey = resolveSecret("PROVIDER_MODULE_KEY")
-        buildConfigField("byte[]", "PROVIDER_MODULE_KEY_BYTES", obfuscateSecret(providerModuleKey))
-
-        // No shared Last.fm key: bring-your-own-key model. Everyone creates
-        // their own key at last.fm/api/account/create and pastes it in
-        // Settings → Integrations / Scrobbling. Nothing Last.fm-related is
-        // baked into the build.
-        buildConfigField("byte[]", "SECRET_MASK_BYTES", maskLiteral)
+        // All backend secrets (URL, API key, module key) live strictly in native .so via
+        // SecretsBridge_generated.h (tools/generate_native_secrets.py).
+        // No secret fields are exposed in DEX / BuildConfig.
 
         externalNativeBuild {
             cmake {
@@ -213,9 +208,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    // Apple-style liquid glass (AGSL refraction + merging). Replaces Kyant backdrop.
-    // Shapes is the lightweight squircle geometry Liquify refracts through (no RenderEffect).
-    implementation(libs.liquify)
+    implementation(libs.kyant.backdrop)
     implementation(libs.kyant.shapes)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
@@ -260,9 +253,6 @@ dependencies {
     // Auto to browse the LastWave library and control the same player.
     implementation("androidx.media:media:1.7.0")
 
-    // Provider-module QuickJS runtime (pinned to the cached 1.0.12 line).
-    implementation("io.github.dokar3:quickjs-kt-android:1.0.12")
-
     // GPLv3 Media3-matched FFmpeg software decoder (distribution must comply).
     // The renderer factory prefers FFmpeg for every codec it supports so all
     // devices decode through one deterministic, OEM-bug-free path; platform
@@ -292,6 +282,9 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.12.2")
     testImplementation("io.mockk:mockk:1.13.10")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+
+    // Bit-perfect USB exclusive output: vendor usbdevfs driver, LastWave sink routing.
+    implementation(project(":audio:decent-usb-audio-driver"))
 }
 
 kotlin {
@@ -306,13 +299,27 @@ configurations.all {
         if (requested.group == "org.jetbrains.kotlin") {
             useVersion(libs.versions.kotlin.get())
         }
-        if (requested.group == "io.github.dokar3" && requested.name.startsWith("quickjs-kt")) {
-            useVersion("1.0.12")
-        }
     }
 }
 
 tasks.withType<Test> {
     maxHeapSize = "2048m"
+}
+
+// Generate native secrets header before CMake configures.
+// CI provides PROVIDER_MODULE_KEY / URL_SECRET / BASE_URL /
+// RELEASE_CERT_SHA256 via env/secrets. Public forks get empty header ->
+// native returns empty -> YouTube fallback, no leak.
+val generateNativeSecrets by tasks.registering(Exec::class) {
+    workingDir = rootProject.projectDir
+    val py = org.gradle.internal.os.OperatingSystem.current().let {
+        if (it.isWindows) "python" else "python3"
+    }
+    commandLine(py, "tools/generate_native_secrets.py")
+    // Never fail public builds when secrets absent; script emits empty header.
+    isIgnoreExitValue = true
+}
+tasks.matching { it.name.startsWith("preBuild") || it.name.startsWith("configureCMake") }.configureEach {
+    dependsOn(generateNativeSecrets)
 }
 

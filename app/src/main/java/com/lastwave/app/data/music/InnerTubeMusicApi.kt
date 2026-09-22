@@ -1,6 +1,7 @@
 package com.lastwave.app.data.music
 
 import android.net.Uri
+import android.os.SystemClock
 import com.lastwave.app.data.local.AppLanguage
 import com.lastwave.app.data.local.SettingsPreferences
 import com.lastwave.app.data.local.appLocale
@@ -1219,8 +1220,12 @@ class InnerTubeMusicApi @Inject constructor(
             return parseSongRenderers(root)
         }
         val filtered = runCatching { runSearch("EgWKAQIIAWoKEAkQBRAKEAMQBA==") }.getOrDefault(emptyList())
-        val unfiltered = runCatching { runSearch(null) }.getOrDefault(emptyList())
-        val results = (unfiltered.take(1) + filtered + unfiltered)
+        // Unfiltered POST only when the filtered search came back empty (rare miss).
+        val results = (if (filtered.isEmpty()) {
+            (runCatching { runSearch(null) }.getOrDefault(emptyList()))
+        } else {
+            filtered
+        })
             .distinctBy { it.videoId }
             .filter { it.videoId.isNotBlank() }
             .take(limit)
@@ -1757,9 +1762,35 @@ class InnerTubeMusicApi @Inject constructor(
         null
     }
 
+    /** Instant in-memory stream peek for 0ms playback (Desktop way). Returns null if not cached/fresh. */
+    fun peekCachedStream(videoId: String): YouTubeAudioStream? {
+        if (videoId.isBlank()) return null
+        val now = System.currentTimeMillis()
+        val authScope = playbackAuthScope()
+        val entry = streamCache.entries
+            .asSequence()
+            .filter { it.key.videoId == videoId && it.key.authScope == authScope }
+            .sortedByDescending { it.value.cachedAtEpochMs }
+            .firstOrNull() ?: return null
+        val cached = entry.value
+        return if (cached.stream.isFresh(cached.cachedAtEpochMs, now)) {
+            cached.stream
+        } else {
+            null
+        }
+    }
+
     /** Resolves and byte-probes an expiring googlevideo URL immediately before use. */
     suspend fun resolveAudioStream(videoId: String): YouTubeAudioStream = withContext(Dispatchers.IO) {
         require(videoId.isNotBlank()) { "Missing YouTube Music video id" }
+        val startedAt = SystemClock.elapsedRealtime()
+        logStage(videoId, "start")
+        peekCachedStream(videoId)?.let { stream ->
+            val authScope = playbackAuthScope()
+            lastResolvedStreams[resolutionKey(videoId, authScope)] = stream
+            logStreamEvent("cache-hit", stream)
+            return@withContext stream
+        }
         val now = System.currentTimeMillis()
         val authScope = playbackAuthScope()
 
@@ -1788,7 +1819,7 @@ class InnerTubeMusicApi @Inject constructor(
         val shared = activeStreamRequests.computeIfAbsent(requestKey) {
             lateinit var request: SharedStreamRequest
             val deferred = apiScope.async(start = CoroutineStart.LAZY) {
-                resolveAudioStreamInternal(videoId, authScope)
+                resolveAudioStreamInternal(videoId, authScope, startedAt)
             }
             request = SharedStreamRequest(deferred)
             deferred.invokeOnCompletion {
@@ -1799,7 +1830,12 @@ class InnerTubeMusicApi @Inject constructor(
         shared.waiters.incrementAndGet()
         shared.deferred.start()
         try {
-            shared.deferred.await()
+            // Hard cap on one full resolution: without it a bad network could
+            // chain every fallback stage into a 60-90s wait before the caller
+            // ever got a chance to retry with fresh state.
+            kotlinx.coroutines.withTimeoutOrNull(STREAM_RESOLVE_TOTAL_TIMEOUT_MS) {
+                shared.deferred.await()
+            } ?: throw IOException("Timed out resolving audio stream for $videoId")
         } finally {
             if (shared.waiters.decrementAndGet() == 0 && !shared.deferred.isCompleted) {
                 shared.deferred.cancel()
@@ -1820,24 +1856,107 @@ class InnerTubeMusicApi @Inject constructor(
         }
     }
 
+    /**
+     * limusic-style direct-URL fast path. Fires the no-cipher clients hedged
+     * in parallel (staggered, first success wins) with a tight per-client
+     * bound and a whole-path budget; returns the first direct-URL audio
+     * stream, or null (never throws) so the full chain below still runs.
+     */
+    private suspend fun resolveDirectUrlFastPath(
+        videoId: String,
+        authScope: String,
+    ): YouTubeAudioStream? = kotlinx.coroutines.coroutineScope {
+        // Cached-only visitor data: never fetch the web config here — the
+        // fast path must stay a pure player POST per client. Startup pre-warm
+        // (preWarmPlayback) keeps this populated from the first song.
+        val visitorData = webConfig?.visitorData
+        val nowMs = System.currentTimeMillis()
+        val ordered = DIRECT_FAST_CLIENT_ORDER
+            .mapNotNull { name -> PLAYER_CLIENTS.firstOrNull { it.name == name } }
+            .filter { nowMs >= (failedClientsUntil[clientFailureKey(videoId, it.key, authScope)] ?: 0L) }
+            // The client that served the previous song is the most likely to
+            // work again — try it first, keep limusic's order otherwise.
+            .sortedByDescending { it.name == lastSuccessfulClientName }
+        if (ordered.isEmpty()) return@coroutineScope null
+
+        val channel = kotlinx.coroutines.channels.Channel<YouTubeAudioStream>(ordered.size)
+        val jobs = ordered.mapIndexed { index, client ->
+            launch(Dispatchers.IO) {
+                // Hedged stagger: each client gets a short head start over the
+                // next, but a slow client never serializes a full timeout
+                // onto the ones behind it.
+                if (index > 0) {
+                    delay(DIRECT_FAST_STAGGER_MS * index)
+                    if (!isActive) return@launch
+                }
+                val stream = try {
+                    kotlinx.coroutines.withTimeoutOrNull(DIRECT_FAST_CLIENT_TIMEOUT_MS) {
+                        resolveDirectClientStream(
+                            videoId = videoId,
+                            client = client,
+                            visitorData = visitorData,
+                            signatureTimestamp = null,
+                            playerPoToken = null,
+                            gvsPoToken = null,
+                            authScope = authScope,
+                            probeCandidates = false,
+                            allowCipherFormats = false,
+                        )
+                    }
+                } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    null
+                }
+                if (stream != null) {
+                    lastSuccessfulClientName = client.name
+                    channel.trySend(stream)
+                }
+            }
+        }
+        val winner = kotlinx.coroutines.withTimeoutOrNull(DIRECT_FAST_PATH_BUDGET_MS) {
+            channel.receiveCatching().getOrNull()
+        }
+        jobs.forEach { it.cancel() }
+        channel.close()
+        winner
+    }
+
     private suspend fun resolveAudioStreamInternal(
         videoId: String,
         authScope: String,
+        startedAt: Long,
     ): YouTubeAudioStream = kotlinx.coroutines.coroutineScope {
         val now = System.currentTimeMillis()
 
-        // InnerTubeX owns the current player/cipher/client fallback strategy.
-        // Probe its result before handing it to Media3; the older direct and
-        // NewPipe paths below remain compatibility fallbacks.
+        // 0. Direct-URL fast path (limusic-style): VISIONOS → ANDROID_VR →
+        // TVHTML5, one player POST each, first direct-URL audio format wins.
+        // No webConfig fetch, no signatureTimestamp, no poToken, no Rhino
+        // decipher, no probe — these clients serve ready URLs. Typical
+        // 1-3s. Miss falls through to the full chain below.
+        resolveDirectUrlFastPath(videoId, authScope)?.let { fast ->
+            cacheResolvedStream(fast, now)
+            lastResolvedStreams[resolutionKey(videoId, authScope)] = fast
+            logStreamEvent("direct-fast-resolved", fast)
+            logStage(videoId, "direct-fast", startedAt)
+            return@coroutineScope fast
+        }
+
+        // 1. Primary: InnerTubeX (Desktop-style — built-in YouTubeCipherService
+        //    handles n-param deobfuscation internally, no Rhino JS overhead).
+        //    Bounded so a hung cipher/config fetch fails fast into stage 2.
+        //    Media3 validates the URL on open — no blocking probeStream here.
         val innerTubeXCandidate = try {
-            val visitorData = try {
-                getWebConfig().visitorData
-            } catch (cancellation: kotlinx.coroutines.CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                null
+            kotlinx.coroutines.withTimeoutOrNull(INNERTUBEX_STAGE_TIMEOUT_MS) {
+                val visitorData = try {
+                    getWebConfig().visitorData
+                } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    null
+                }
+                innerTubeXExtractor.resolve(videoId, visitorData, authScope)
             }
-            innerTubeXExtractor.resolve(videoId, visitorData, authScope)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
@@ -1846,15 +1965,15 @@ class InnerTubeMusicApi @Inject constructor(
         }
         if (innerTubeXCandidate != null) {
             val compatible = innerTubeXCandidate.isAdaptive || isCompatibleAudioCandidate(innerTubeXCandidate)
+            // Return URL immediately; player open is the real validation (SimpMusic/LiMusic).
             if (compatible) {
                 cacheResolvedStream(innerTubeXCandidate, now)
                 lastResolvedStreams[resolutionKey(videoId, authScope)] = innerTubeXCandidate
                 logStreamEvent("innertubex-resolved", innerTubeXCandidate)
+                logStage(videoId, "innertubex", startedAt)
                 return@coroutineScope innerTubeXCandidate
             }
             logStreamEvent("innertubex-rejected", innerTubeXCandidate, detail = "compatible=$compatible")
-            // A candidate that fails validation must not make the same
-            // InnerTubeX profile win the next resolution again.
             innerTubeXExtractor.reportPlaybackFailure(
                 videoId = videoId,
                 authScope = authScope,
@@ -1862,6 +1981,8 @@ class InnerTubeMusicApi @Inject constructor(
             )
         }
 
+        // 2. Parallel fallback: race direct InnerTube clients vs NewPipe
+        //    (NewPipe is no longer primary — it's a parallel racer, first to finish wins)
         val configDeferred = async(Dispatchers.IO) {
             getWebConfig()
         }
@@ -1884,42 +2005,16 @@ class InnerTubeMusicApi @Inject constructor(
             if (remainingResolvers.decrementAndGet() == 0) channel.close()
         }
 
-        jobs += launch(Dispatchers.IO) {
-            var lastFailure: Throwable? = null
-            try {
-                for (attempt in 0..1) {
-                    try {
-                        val stream = streamExtractor.resolveAudioStream(videoId)
-                        if (!probeStream(stream, "newpipe-probe", attempt)) {
-                            throw IOException("NewPipe returned a rejected media URL for $videoId")
-                        }
-                        channel.trySend(stream)
-                        return@launch
-                    } catch (cancellation: kotlinx.coroutines.CancellationException) {
-                        throw cancellation
-                    } catch (error: Throwable) {
-                        lastFailure = error
-                        if (attempt == 0 && error.confirmedUnavailableReasonOrNull() == null) {
-                            streamExtractor.invalidatePlayerState(videoId)
-                            delay(NEWPIPE_RETRY_BASE_DELAY_MS + Random.nextLong(NEWPIPE_RETRY_JITTER_MS + 1L))
-                        } else {
-                            break
-                        }
-                    }
-                }
-                val confirmedReason = lastFailure?.confirmedUnavailableReasonOrNull()
-                if (confirmedReason != null) confirmedUnavailableReasons += confirmedReason
-                else transientFailures += "NewPipe: ${lastFailure?.message.orEmpty()}"
-            } finally {
-                resolverFinished()
-            }
-        }
-
+        // 2a. Direct InnerTube clients (hedged parallel, no Rhino dependency)
         jobs += launch(Dispatchers.IO) {
             try {
                 val config = configDeferred.await()
-                val signatureTimestamp = signatureTimestampDeferred.await()
-                val poTokenResult = poTokenDeferred.await()
+                // Do NOT await signatureTimestampDeferred here: it goes
+                // through NewPipe's player-JS download and used to hold back
+                // every direct client for 10-20s on a cold cache. Only the
+                // web clients below actually need it, and they await it
+                // lazily inside their own job.
+                val poTokenResult = kotlinx.coroutines.withTimeoutOrNull(1_500L) { poTokenDeferred.await() }
                 val poToken = poTokenResult?.playerToken
                 val gvsPoToken = poTokenResult?.sessionToken?.takeIf { config.visitorData != null }
                 val availableClients = playerClients(config).filter { candidate ->
@@ -1938,6 +2033,14 @@ class InnerTubeMusicApi @Inject constructor(
 
                         clientJobs += launch(Dispatchers.IO) {
                             try {
+                                // Only web clients must present a signature
+                                // timestamp; app/TV clients play without one.
+                                // Awaiting it here keeps the NewPipe player-JS
+                                // fetch off the critical path of every client
+                                // that doesn't need it.
+                                val signatureTimestamp = if (client.needsSignatureTimestamp) {
+                                    runCatching { signatureTimestampDeferred.await() }.getOrNull()
+                                } else null
                                 val stream = resolveDirectClientStream(
                                     videoId = videoId,
                                     client = client,
@@ -1980,12 +2083,55 @@ class InnerTubeMusicApi @Inject constructor(
             }
         }
 
+        // 2b. NewPipe racer (parallel with direct clients — NOT primary, just a racer)
+        jobs += launch(Dispatchers.IO) {
+            var lastFailure: Throwable? = null
+            try {
+                for (attempt in 0..1) {
+                    try {
+                        val stream = streamExtractor.resolveAudioStream(videoId)
+                        // No pre-return probe: Media3 open validates. Keeps first byte fast.
+                        channel.trySend(stream)
+                        return@launch
+                    } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                        throw cancellation
+                    } catch (error: Throwable) {
+                        lastFailure = error
+                        if (attempt == 0 && error.confirmedUnavailableReasonOrNull() == null) {
+                            // Only a rejected media URL proves the cached
+                            // player JS is stale. Wiping it on any transient
+                            // error forced a full player-JS re-download (and
+                            // Rhino re-parse) for the NEXT song too — the
+                            // per-song 10-30s penalty this retry caused.
+                            val staleCipherEvidence = error is IOException &&
+                                error.message?.contains("rejected media URL") == true
+                            if (staleCipherEvidence) streamExtractor.invalidatePlayerState(videoId)
+                            delay(NEWPIPE_RETRY_BASE_DELAY_MS + Random.nextLong(NEWPIPE_RETRY_JITTER_MS + 1L))
+                        } else {
+                            break
+                        }
+                    }
+                }
+                val confirmedReason = lastFailure?.confirmedUnavailableReasonOrNull()
+                if (confirmedReason != null) confirmedUnavailableReasons += confirmedReason
+                else transientFailures += "NewPipe: ${lastFailure?.message.orEmpty()}"
+            } finally {
+                resolverFinished()
+            }
+        }
+
         try {
-            val winner = channel.receiveCatching().getOrNull()
+            // Bounded wait: if neither racer produces a winner in time, fall
+            // through to the last-resort stage instead of waiting for every
+            // hedged client's retries to exhaust themselves.
+            val winner = kotlinx.coroutines.withTimeoutOrNull(CLIENT_RACE_TIMEOUT_MS) {
+                channel.receiveCatching().getOrNull()
+            }
             if (winner != null) {
                 cacheResolvedStream(winner, now)
                 lastResolvedStreams[resolutionKey(videoId, authScope)] = winner
                 logStreamEvent("resolved", winner)
+                logStage(videoId, "race", startedAt)
                 winner
             } else {
                 val confirmedReason = confirmedUnavailableReasons.firstOrNull()
@@ -2000,9 +2146,12 @@ class InnerTubeMusicApi @Inject constructor(
             if (e is kotlinx.coroutines.CancellationException) throw e
             if (e is ConfirmedUnplayableMediaException) throw e
             jobs.forEach { it.cancel() }
-            streamExtractor.invalidatePlayerState(videoId)
+            // 3. Last resort: NewPipe, bounded so one hung extraction can't run unbounded.
+            //    No pre-return probe — Media3 validates on open.
             val npStream = try {
-                streamExtractor.resolveAudioStream(videoId)
+                kotlinx.coroutines.withTimeoutOrNull(NEWPIPE_FALLBACK_TIMEOUT_MS) {
+                    streamExtractor.resolveAudioStream(videoId)
+                } ?: throw IOException("NewPipe fallback timed out for $videoId")
             } catch (cancellation: kotlinx.coroutines.CancellationException) {
                 throw cancellation
             } catch (fallbackFailure: Throwable) {
@@ -2015,13 +2164,10 @@ class InnerTubeMusicApi @Inject constructor(
                 }
                 throw IOException("Unable to resolve audio stream for $videoId", fallbackFailure)
             }
-            if (!probeStream(npStream, "fallback-probe")) {
-                streamExtractor.invalidatePlayerState(videoId)
-                throw IOException("Fallback extraction returned a rejected media URL for $videoId")
-            }
             cacheResolvedStream(npStream, now)
             lastResolvedStreams[resolutionKey(videoId, authScope)] = npStream
             logStreamEvent("fallback-resolved", npStream)
+            logStage(videoId, "newpipe-fallback", startedAt)
             npStream
         } finally {
             channel.close()
@@ -2038,6 +2184,8 @@ class InnerTubeMusicApi @Inject constructor(
         playerPoToken: String?,
         gvsPoToken: String?,
         authScope: String,
+        probeCandidates: Boolean = true,
+        allowCipherFormats: Boolean = true,
     ): YouTubeAudioStream {
         val body = buildJsonObject {
             put("context", buildJsonObject {
@@ -2084,6 +2232,10 @@ class InnerTubeMusicApi @Inject constructor(
             referer = client.referer,
             visitorData = visitorData,
             maxAttempts = MAX_PLAYER_REQUEST_ATTEMPTS,
+            // Whole-call cap (connect + read + body): the injected client's
+            // 15s socket timeouts otherwise let one hung POST stall a hedged
+            // racer for 30s+ across its two attempts.
+            callTimeoutMs = PLAYER_REQUEST_CALL_TIMEOUT_MS,
         )
         val status = root.obj("playabilityStatus")
         val state = status?.string("status")
@@ -2114,8 +2266,12 @@ class InnerTubeMusicApi @Inject constructor(
         val candidates = formats.mapNotNull { (element, isAdaptive) ->
                 val format = element as? JsonObject ?: return@mapNotNull null
                 val url = format.string("url")
-                    ?: (format.string("signatureCipher") ?: format.string("cipher"))
-                        ?.let { streamExtractor.decipherStreamUrl(videoId, it) }
+                    ?: if (allowCipherFormats) {
+                        (format.string("signatureCipher") ?: format.string("cipher"))
+                            ?.let { streamExtractor.decipherStreamUrl(videoId, it) }
+                    } else {
+                        null
+                    }
                     ?: return@mapNotNull null
                 val mime = format.string("mimeType")
                 if (mime?.startsWith("audio/") != true) return@mapNotNull null
@@ -2139,10 +2295,19 @@ class InnerTubeMusicApi @Inject constructor(
                 )
             }
             .filter(::isCompatibleAudioCandidate)
+            // IOS-app formats only serve bounded-Range requests and 403 the
+            // open-ended opens ExoPlayer (and plain probes) use — never play
+            // them, on any path.
+            .filter { !it.clientProfile.startsWith("IOS@") }
             .sortedWith(
                 compareBy<YouTubeAudioStream> { it.isAdaptive }
                     .thenByDescending { it.bitrate },
             )
+        // Direct fast path: no probeCandidates. Stage 2 still probes defensively for cipher clients.
+        if (!probeCandidates) {
+            return candidates.firstOrNull()
+                ?: throw IOException("${client.key} returned no usable audio URL")
+        }
         for (candidate in candidates.take(MAX_FORMAT_PROBES_PER_CLIENT)) {
             if (probeStream(candidate, "client-probe")) return candidate
         }
@@ -2171,11 +2336,12 @@ class InnerTubeMusicApi @Inject constructor(
             .url(stream.url)
             .header("Accept-Encoding", "identity")
             .apply {
-                if (!isHls && !stream.isAdaptive) header("Range", "bytes=0-1")
+                if (!isHls) header("Range", "bytes=0-1")
                 stream.requestHeaders.forEach { (name, value) -> header(name, value) }
             }
         val request = requestBuilder.build()
         val call = http.newCall(request)
+        call.timeout().timeout(STREAM_PROBE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         val cancellationHandle = currentCoroutineContext()[kotlinx.coroutines.Job]
             ?.invokeOnCompletion { cause ->
                 if (cause is kotlinx.coroutines.CancellationException) call.cancel()
@@ -2276,8 +2442,9 @@ class InnerTubeMusicApi @Inject constructor(
         stream: YouTubeAudioStream,
         httpStatus: Int? = null,
         retry: Int = 0,
-        detail: String = "",
+        detail: String? = null,
     ) {
+        android.util.Log.i(STREAM_LOG_TAG, "[YOUTUBE] stage=$stage videoId=${stream.videoId} client=${stream.clientProfile} status=$httpStatus retry=$retry detail=$detail")
         val now = System.currentTimeMillis()
         val expiryState = when {
             stream.expiresAtEpochMs == null -> "unknown"
@@ -2288,8 +2455,13 @@ class InnerTubeMusicApi @Inject constructor(
             STREAM_LOG_TAG,
             "stage=$stage videoId=${stream.videoId} client=${stream.clientProfile} " +
                 "itag=${stream.itag ?: -1} mime=${stream.mimeType.orEmpty()} " +
-                "expiry=$expiryState retry=$retry http=${httpStatus ?: 0} ${detail.take(80)}",
+                "expiry=$expiryState retry=$retry http=${httpStatus ?: 0} ${detail?.take(80).orEmpty()}",
         )
+    }
+
+    private fun logStage(videoId: String, stage: String, startedAt: Long? = null) {
+        val elapsed = startedAt?.let { SystemClock.elapsedRealtime() - it }
+        android.util.Log.i(STREAM_LOG_TAG, "[YOUTUBE] id=$videoId stage=$stage" + (elapsed?.let { " +${it}ms" } ?: ""))
     }
 
     private fun logClientFailure(videoId: String, client: String, error: Throwable?) {
@@ -2393,6 +2565,13 @@ class InnerTubeMusicApi @Inject constructor(
 
     suspend fun isPlayable(title: String, artist: String): Boolean =
         findBestMatchOrNull(title, artist) != null
+
+    /** Warms the cached web config (api key/version/visitor data) so the
+     *  first playback's fast path can attach visitor data without an extra
+     *  blocking fetch. Safe to call from a startup coroutine; never throws. */
+    suspend fun preWarmPlayback() {
+        runCatching { getWebConfig() }
+    }
 
     private suspend fun getWebConfig(): WebConfig {
         webConfig?.let { return it }
@@ -2530,8 +2709,12 @@ class InnerTubeMusicApi @Inject constructor(
         }
 
     private fun Exception.isTransientRequestFailure(): Boolean = when (this) {
+        // Only HTTP-level transient statuses retry. Broad `IOException -> true`
+        // used to retry connection resets/DNS for a full second per call on the
+        // interactive path; keep connect timeouts classified as transient below.
         is InnerTubeHttpException -> responseCode == 408 || responseCode == 429 || responseCode in 500..599
-        is IOException -> true
+        is java.net.SocketTimeoutException, is java.net.ConnectException -> true
+        is IOException -> this is java.io.InterruptedIOException
         else -> false
     }
 
@@ -3037,6 +3220,10 @@ class InnerTubeMusicApi @Inject constructor(
         val androidSdkVersion: String? = null,
     ) {
         val key = "$name@$version"
+        /** Web clients must present a signatureTimestamp in the player
+         *  request; app/TV clients resolve fine without one. */
+        val needsSignatureTimestamp: Boolean
+            get() = name == "WEB_REMIX" || name == "WEB_EMBEDDED_PLAYER" || name == "MWEB"
         val origin = if (name == "WEB_REMIX") YOUTUBE_MUSIC_ORIGIN else YOUTUBE_ORIGIN
         val referer = when (name) {
             "WEB_REMIX" -> "$YOUTUBE_MUSIC_ORIGIN/"
@@ -3090,10 +3277,32 @@ class InnerTubeMusicApi @Inject constructor(
         const val WRITE_ACTIONS_PER_REQUEST = 50
 
         const val HEDGED_CLIENT_STAGGER_DELAY_MS = 300L
+        /** Per-client bound for the direct-URL fast path (single POST, no extras). */
+        const val DIRECT_FAST_CLIENT_TIMEOUT_MS = 2_500L
+        /** Stagger between hedged fast-path clients; first success wins. */
+        const val DIRECT_FAST_STAGGER_MS = 250L
+        /** Whole fast path must settle inside this budget before heavier stages run. */
+        const val DIRECT_FAST_PATH_BUDGET_MS = 4_000L
+        /** Whole-call cap for one player-API POST (connect + read + body). */
+        const val PLAYER_REQUEST_CALL_TIMEOUT_MS = 6_000L
+        /** Max wait on the direct-client/NewPipe race before the last-resort stage. */
+        const val CLIENT_RACE_TIMEOUT_MS = 8_000L
+        /** Hard cap for one full stream resolution; callers retry with fresh state. */
+        const val STREAM_RESOLVE_TOTAL_TIMEOUT_MS = 12_000L
+        /** Bound for the InnerTubeX cipher stage so a hung resolve fails fast. */
+        const val INNERTUBEX_STAGE_TIMEOUT_MS = 4_000L
+        /** Bound for the last-resort NewPipe stage. */
+        const val NEWPIPE_FALLBACK_TIMEOUT_MS = 6_000L
+        /** Overall budget for promoting a staged YouTube stream from MusicPlayer. */
+        const val YOUTUBE_PROMOTE_BUDGET_MS = 12_000L
+        /** No-cipher clients tried first, in order (mirrors limusic's fallback order). */
+        val DIRECT_FAST_CLIENT_ORDER = listOf("VISIONOS", "ANDROID_VR", "TVHTML5")
         const val MAX_FORMAT_PROBES_PER_CLIENT = 2
         const val MAX_PLAYER_REQUEST_ATTEMPTS = 2
         const val CONFIG_REQUEST_TIMEOUT_MS = 4_000L
         const val RELATED_REQUEST_TIMEOUT_MS = 8_000L
+        /** Per-probe socket timeout for the 0-1 byte stream validity check. */
+        const val STREAM_PROBE_TIMEOUT_MS = 4_000L
         const val HISTORY_PING_TIMEOUT_MS = 15_000L
         const val URL_EXPIRY_MARGIN_MS = 2 * 60 * 1000L
         const val REQUEST_RETRY_BASE_DELAY_MS = 250L
@@ -3135,9 +3344,9 @@ class InnerTubeMusicApi @Inject constructor(
         val PLAYER_CLIENTS = listOf(
             PlayerClient(
                 name = "ANDROID_VR",
-                version = "1.37",
+                version = "1.65.10",
                 apiKey = "AIzaSyD-p045F_WzU-vA_YgX20SCx4KAo",
-                userAgent = "com.google.android.apps.youtube.vr.oculus/1.37 (Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1; Cronet/107.0.5284.2)",
+                userAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                 osName = "Android",
                 osVersion = "12",
                 deviceMake = "Oculus",
