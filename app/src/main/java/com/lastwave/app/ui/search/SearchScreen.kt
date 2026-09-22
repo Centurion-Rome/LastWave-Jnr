@@ -250,6 +250,14 @@ fun SearchScreen(
             }
         }
 
+        // Old-HiFi analog VU strip, fixed below the search header (same pattern
+        // as the playlists overview which pins below its top elements).
+        com.lastwave.app.ui.common.AnalogVuMeter(
+            isPlaying = playbackState.isPlaying,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            level = com.lastwave.app.ui.common.rememberRealBassLevel(playbackState.isPlaying),
+        )
+
         Box(Modifier.fillMaxSize().safeHorizontalContentPadding()) {
             when {
                 // 1. Live Auto-Complete Suggestions (while actively typing)

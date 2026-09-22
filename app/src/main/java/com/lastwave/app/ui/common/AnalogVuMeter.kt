@@ -461,23 +461,32 @@ fun PlaybackVuMeter(
 }
 
 /**
- * Sticky VU strip for LazyColumn [stickyHeader] slots (single playlist,
- * artist songs, album songs).
+ * VU strip shown below the hero picture on detail screens (single playlist /
+ * liked songs, artist songs, album songs).
  *
- * The opaque [MaterialTheme.colorScheme.background] is load-bearing: without
- * it the track rows scrolling underneath would bleed through when the header
- * pins to the top. Real bass when the PCM tap flows, simulated groove
- * otherwise — same wiring as the playlists-overview strip.
+ * Two usages:
+ * - inline: regular LazyColumn `item` that scrolls away with the content.
+ * - pinned: fixed copy placed in the top overlay `Column` directly below the
+ *   back-arrow top bar, faded in once the inline copy scrolls off-screen.
+ *   The overlay placement is load-bearing: a LazyColumn `stickyHeader` always
+ *   pins to y=0 (behind the status bar / over the back arrow), while the
+ *   overlay copy naturally sits *below* the top bar.
+ *
+ * The opaque [containerColor] is load-bearing: without it the track rows
+ * scrolling underneath would bleed through. Real bass when the PCM tap
+ * flows, simulated groove otherwise — same wiring as the
+ * playlists-overview strip.
  */
 @Composable
 fun StickyVuMeter(
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
+    containerColor: Color = androidx.compose.material3.MaterialTheme.colorScheme.background,
 ) {
     androidx.compose.foundation.layout.Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(androidx.compose.material3.MaterialTheme.colorScheme.background)
+            .background(containerColor)
             .padding(vertical = 4.dp),
     ) {
         AnalogVuMeter(

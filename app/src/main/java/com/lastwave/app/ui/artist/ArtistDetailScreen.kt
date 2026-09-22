@@ -137,6 +137,15 @@ fun ArtistDetailScreen(
             listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 240
         }
     }
+    // Pinned VU copy takes over as soon as the hero scrolls off (inline VU is
+    // at index 1). A stickyHeader would pin to y=0, over the back arrow — the
+    // overlay copy below pins under the top bar. Must be >= 1 (not > 1) or the
+    // inline VU sits hidden behind the top bar with no pinned copy showing.
+    val showPinnedVu by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex >= 1
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -407,8 +416,10 @@ fun ArtistDetailScreen(
                         }
                     }
 
-                    // Old-HiFi analog VU below the top picture, pinned while scrolling.
-                    stickyHeader(key = "vu_meter", contentType = "vu_meter") { _ ->
+                    // Old-HiFi analog VU below the top picture. Inline copy scrolls
+                    // with the content; pinned copy in the top overlay fades in
+                    // below the back-arrow bar once this scrolls off-screen.
+                    item(key = "vu_meter", contentType = "vu_meter") {
                         com.lastwave.app.ui.common.StickyVuMeter(
                             isPlaying = playbackState.isPlaying,
                         )
@@ -734,14 +745,20 @@ fun ArtistDetailScreen(
             }
         }
 
-        Surface(
-            color = if (showScrolledHeader) MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.98f) else Color.Transparent,
-            tonalElevation = if (showScrolledHeader) 4.dp else 0.dp,
-            shadowElevation = if (showScrolledHeader) 6.dp else 0.dp,
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .zIndex(10f)
                 .align(Alignment.TopCenter),
+        ) {
+        val topBarColor = if (showScrolledHeader) MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.98f) else Color.Transparent
+        val topBarTonal = if (showScrolledHeader) 4.dp else 0.dp
+        val topBarShadow = if (showScrolledHeader) 6.dp else 0.dp
+        Surface(
+            color = topBarColor,
+            tonalElevation = topBarTonal,
+            shadowElevation = topBarShadow,
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier
@@ -803,6 +820,32 @@ fun ArtistDetailScreen(
                     }
                 }
             }
+        }
+        // Pinned VU copy below the back-arrow bar once the inline copy scrolls off.
+        AnimatedVisibility(
+            visible = showPinnedVu,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Surface(
+                color = topBarColor,
+                tonalElevation = topBarTonal,
+                shadowElevation = topBarShadow,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .adaptiveContentWidth(maxWidth = 860.dp)
+                        .padding(horizontal = 16.dp),
+                ) {
+                    com.lastwave.app.ui.common.StickyVuMeter(
+                        isPlaying = playbackState.isPlaying,
+                        containerColor = topBarColor,
+                    )
+                }
+            }
+        }
         }
     }
 

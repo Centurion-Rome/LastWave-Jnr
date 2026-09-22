@@ -152,6 +152,14 @@ fun DiscoverScreen(onBack: () -> Unit = {}, viewModel: DiscoverViewModel = hiltV
             },
         )
 
+        // Old-HiFi analog VU strip, fixed below the header (same pattern as
+        // the playlists overview which pins below its top elements).
+        com.lastwave.app.ui.common.AnalogVuMeter(
+            isPlaying = playbackState.isPlaying,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            level = com.lastwave.app.ui.common.rememberRealBassLevel(playbackState.isPlaying),
+        )
+
         Box(Modifier.fillMaxSize().safeHorizontalContentPadding()) {
             Crossfade(
                 targetState = state.isLoading && state.tracks.isEmpty(),

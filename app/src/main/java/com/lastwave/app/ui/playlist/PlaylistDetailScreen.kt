@@ -277,6 +277,18 @@ fun PlaylistDetailScreen(
             listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 240
         }
     }
+    // Pinned VU copy (fixed overlay below the back-arrow top bar) takes over
+    // as soon as the hero scrolls off (inline VU is at index 1). A LazyColumn
+    // stickyHeader would pin to y=0, behind the status bar / over the back
+    // arrow — the overlay Column below pins under the top bar by construction.
+    // NOTE: must be >= 1 (not > 1): with > 1 there is a dead zone where the
+    // inline VU sits at y=0 hidden behind the top bar while the pinned copy
+    // is still hidden.
+    val showPinnedVu by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex >= 1
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -589,9 +601,11 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            // Old-HiFi analog VU below the picture, pinned while scrolling.
+            // Old-HiFi analog VU below the picture. Inline copy scrolls with the
+            // content; a second (pinned) copy in the top overlay fades in below
+            // the back-arrow bar once this one scrolls off-screen.
             // Real bass when the PCM tap flows, simulated groove otherwise.
-            stickyHeader(key = "vu_meter", contentType = "vu_meter") { _ ->
+            item(key = "vu_meter", contentType = "vu_meter") {
                 com.lastwave.app.ui.common.StickyVuMeter(
                     isPlaying = playbackState.isPlaying,
                 )
@@ -748,13 +762,17 @@ fun PlaylistDetailScreen(
             label = "topBarElevation",
         )
 
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .zIndex(10f),
+        ) {
         Surface(
             color = topBarBg,
             tonalElevation = topBarElevation,
             shadowElevation = topBarElevation,
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier
@@ -992,6 +1010,34 @@ fun PlaylistDetailScreen(
                     }
                 }
             }
+        }
+        // Pinned VU copy: fixed below the back-arrow top bar once the inline
+        // copy scrolls off-screen. Same width cap + horizontal insets as the
+        // list so it lines up with the inline copy.
+        AnimatedVisibility(
+            visible = showPinnedVu,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Surface(
+                color = topBarBg,
+                tonalElevation = topBarElevation,
+                shadowElevation = topBarElevation,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .adaptiveContentWidth(maxWidth = 860.dp)
+                        .padding(horizontal = 16.dp),
+                ) {
+                    com.lastwave.app.ui.common.StickyVuMeter(
+                        isPlaying = playbackState.isPlaying,
+                        containerColor = topBarBg,
+                    )
+                }
+            }
+        }
         }
 
         AnimatedVisibility(
