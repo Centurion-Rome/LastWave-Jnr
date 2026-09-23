@@ -312,6 +312,21 @@ class MusicPlayer @Inject constructor(
      */
     private var lastAutoAdvanceKey: String? = null
     private var lastAutoAdvanceAtMs = 0L
+    /**
+     * Rendering watchdog (silent-advance safety net): ExoPlayer position at
+     * the last ticker sample, buffer at the last sample, and when the
+     * current stall began (0 = rendering or not monitored). See the ticker
+     * check below for the full contract.
+     */
+    private var lastRenderPositionMs = -1L
+    private var lastRenderBufferedMs = -1L
+    private var renderStallSinceMs = 0L
+    /** Same, for the inaudible-but-rendering branch + its position cursor. */
+    private var inaudibleSinceMs = 0L
+    private var lastAdvancingPositionMs = -1L
+    /** Recovery attempts per mediaId, so a hopeless window stops at 2 and
+     *  the existing error/unavailable machinery owns it from there. */
+    private val silentRecoveries = mutableMapOf<String, Int>()
     private var sleepTimerDeadlineMs: Long? = null
     private var sleepTimerStep = 0
     @Volatile
@@ -351,6 +366,9 @@ class MusicPlayer @Inject constructor(
     // Written by the settings collector, read on the main thread.
     @Volatile
     private var bitPerfectEnabled = false
+    /** PCM rate reported by the decoder. Wins over a catalog tag that guessed 44.1. */
+    @Volatile
+    private var decodedSampleRateHz = 0
     /**
      * Whether the native layer actually honors the current Bit-Perfect
      * request (read back after every [updateBitPerfectState], not just the
@@ -553,6 +571,7 @@ class MusicPlayer @Inject constructor(
                         samplingRateKHz = null,
                     )
                 }
+                decodedSampleRateHz = 0
                 mediaItem.localConfiguration
                     ?.customCacheKey
                     ?.let(preparedStreams::get)
@@ -860,10 +879,13 @@ class MusicPlayer @Inject constructor(
                     processor = NativePcmAudioProcessor(processorEngine),
                     onPlatformEffectsRequired = effects::setFallbackRequired,
                     usbOutput = if (handleAudioFocus) UsbBitPerfectOutput(audioManager) else null,
-                    exclusiveUsb = exclusiveUsbOutput,
+                    // The crossfade standby must not share the DAC. Its
+                    // volume is 0, and a second configure() retunes the clock
+                    // to the next track (44.1 PCM written into a 96 kHz alt).
+                    exclusiveUsb = if (handleAudioFocus) exclusiveUsbOutput else null,
                 ).also { sink ->
                     sink.setBitPerfectRequested(bitPerfectEnabled || usbExclusivePrefEnabled)
-                    sink.syncExclusiveUsb(exclusiveUsbWanted())
+                    sink.syncExclusiveUsb(handleAudioFocus && exclusiveUsbWanted())
                     audioSinks.add(sink)
                     runCatching {
                         routedDacDeviceId?.let { id -> findOutputDevice(id)?.let(sink::setPreferredDevice) }
@@ -931,6 +953,7 @@ class MusicPlayer @Inject constructor(
                         _state.update { snapshot ->
                             var updated = snapshot
                             if (rateHz > 0) {
+                                decodedSampleRateHz = rateHz
                                 val kHz = rateHz / 1000.0
                                 if (updated.samplingRateKHz != kHz) updated = updated.copy(samplingRateKHz = kHz)
                             }
@@ -1027,7 +1050,10 @@ class MusicPlayer @Inject constructor(
                 var cadenceMs = 500L
                 try {
                     val usbAlive = !exclusiveUsbOutput.isActive() || exclusiveUsbOutput.isStreamAlive()
-                    val playingNow = _state.value.isPlaying && !exclusiveUsbOutput.isPaused() && usbAlive
+                    val playingNow = _state.value.isPlaying &&
+                        !_state.value.isBuffering &&
+                        !exclusiveUsbOutput.isPaused() &&
+                        usbAlive
                     val playhead = advancePlayhead(playingNow)
                     if (playhead != _state.value.positionMs) {
                         _state.update { it.copy(positionMs = playhead) }
@@ -1124,6 +1150,7 @@ class MusicPlayer @Inject constructor(
                     // Stream-health sampling: effective clock drift + glitch
                     // watch, 1 Hz while playing. Feeds the signal-path popup.
                     val tickerNow = SystemClock.elapsedRealtime()
+                    updateRenderStallWatchdog(tickerNow)
                     val healthPlaying = player.isPlaying || _state.value.isPlaying
                     if (healthPlaying && tickerNow - lastSignalPathMs >= SIGNAL_PATH_TICK_MS) {
                         lastSignalPathMs = tickerNow
@@ -1956,6 +1983,17 @@ class MusicPlayer @Inject constructor(
         usbExclusiveSinkActive = exclusive
         runCatching { audioEffectsEngine.setUsbExclusiveActive(exclusive) }
         runCatching { secondaryEffects?.setUsbExclusiveActive(exclusive) }
+        // Same-family fallback for DACs lacking the source rate (88.2 ->
+        // 44.1 kHz): the exclusive stream opens at the supported rate with
+        // native soxr conversion instead of failing onto the mixer. Null =
+        // native rate (or no DAC / not exclusive): today's behavior.
+        // The signal path stays honest automatically — the resampler check
+        // fails, so a converted track can never report gold.
+        val fallbackHz = if (exclusiveWanted && dac != null) {
+            selectExclusiveRateFallback(sourceRateHz, dac.sampleRatesHz)
+        } else {
+            null
+        }
         val device = if (!exclusive && dac != null && dac.deviceId > 0 && (sourceRateHz ?: 0) > 0) {
             findOutputDevice(dac.deviceId)
         } else {
@@ -1965,12 +2003,14 @@ class MusicPlayer @Inject constructor(
         audioSinks.forEach { sink ->
             runCatching { sink.setPreferredDevice(if (exclusive) null else device) }
             runCatching { sink.setOutputSampleRateOverride(sourceRateHz) }
+            runCatching { sink.setExclusiveFallbackRateHz(fallbackHz) }
         }
         android.util.Log.i(
             "MusicPlayer",
             "BIT-PERFECT OUTPUT REQUEST srcRate=$sourceRateHz " +
                 "dac=${dac?.name} routed=${device != null} exclusive=$exclusive " +
-                "wanted=$exclusiveWanted bitPerfect=$bitPerfectEnabled",
+                "wanted=$exclusiveWanted bitPerfect=$bitPerfectEnabled " +
+                "rateFallback=${fallbackHz?.let { "$sourceRateHz->$it" } ?: "none"}",
         )
         usbDacMonitor.setRouteRequested(exclusive || device != null)
         exclusiveUsbOutput.syncListeningGain()
@@ -2170,10 +2210,16 @@ class MusicPlayer @Inject constructor(
         if (player.currentPosition > 5_000) {
             player.seekTo(0)
         } else {
-            // Under shuffle, ExoPlayer's permutation previous is almost never
-            // the song just heard (rebuilt on toggle/handoff/edits) — walk
-            // the explicit listening history first.
+            // Under shuffle, walk the explicit listening history first:
+            // the engine permutation is rebuilt on toggle/handoff/edits, so
+            // its "previous" is often a song never heard in this session.
+            // With exhausted history there is no heard song to return to —
+            // restart instead of jumping to a random unheard track.
             val historyIndex = if (pendingState.shuffleEnabled) popHistoryIndex(pendingState) else null
+            if (historyIndex == null && pendingState.shuffleEnabled) {
+                player.seekTo(0)
+                return@onMain
+            }
             val index = historyIndex
                 ?: player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }
                 ?: previousQueueIndex(pendingState)
@@ -2283,7 +2329,13 @@ class MusicPlayer @Inject constructor(
         val queue = state.queue
         if (queue.isEmpty()) return C.INDEX_UNSET
         val start = (state.currentIndex + 1).coerceAtLeast(0)
-        val ordered = if (state.shuffleEnabled) queue.indices.shuffled() else {
+        // Shuffle fallback (engine has no next, e.g. repeat-off at the true
+        // permutation end): with repeat-all keep going on a random track,
+        // otherwise stop — an unconditional random jump here made shuffle
+        // play forever and made manual-next at the end jump unpredictably.
+        val ordered = if (state.shuffleEnabled) {
+            if (state.repeatMode == Player.REPEAT_MODE_ALL) queue.indices.shuffled() else emptyList()
+        } else {
             (start until queue.size) + if (state.repeatMode == Player.REPEAT_MODE_ALL) (0 until start) else emptyList()
         }
         return ordered.firstOrNull { it != state.currentIndex && queue[it].mediaIdKey() !in unavailableMediaIds }
@@ -2316,6 +2368,25 @@ class MusicPlayer @Inject constructor(
         }
     }
 
+    /**
+     * Takes over playback of [index] after (re)installing its media source.
+     * The loader thread may have already opened its own resolve of this
+     * placeholder and started audible playback while the app-level resolve
+     * was still in flight: rewinding to zero then replays the intro seconds
+     * ("plays a moment then jumps"). Only seek when still at the very start.
+     */
+    @MainThread
+    private fun takeOverPlayback(index: Int, expectedMediaId: String) {
+        val alreadyAudible = player.currentMediaItemIndex == index &&
+            player.currentMediaItem?.mediaId == expectedMediaId &&
+            (player.isPlaying || player.currentPosition > 1_500L)
+        if (!alreadyAudible) {
+            player.seekToDefaultPosition(index)
+        }
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        player.play()
+    }
+
     @MainThread
     private fun resolveAndPlayQueueItem(index: Int) {
         if (index !in 0 until player.mediaItemCount) {
@@ -2338,9 +2409,7 @@ class MusicPlayer @Inject constructor(
             mediaItem.localConfiguration?.customCacheKey
                 ?.let(preparedStreams::get)
                 ?.let(::publishResolvedQuality)
-            player.seekToDefaultPosition(index)
-            if (player.playbackState == Player.STATE_IDLE) player.prepare()
-            player.play()
+            takeOverPlayback(index, mediaItem.mediaId)
             preloadNextQueueItem(index)
             return
         }
@@ -2377,6 +2446,7 @@ class MusicPlayer @Inject constructor(
                 samplingRateKHz = null,
             )
         }
+        decodedSampleRateHz = 0
         playRequest = applicationScope.launch(Dispatchers.IO) {
             try {
                 val resolved = resolveTrackAudioStreamWithRetry(
@@ -2398,9 +2468,7 @@ class MusicPlayer @Inject constructor(
                     logStreamEvent("queue-prepare", resolved, retry = 0)
                     cacheCurrentTrackStream(resolved)
                     player.replaceMediaItem(index, track.toMediaItem(resolved))
-                    player.seekToDefaultPosition(index)
-                    player.prepare()
-                    player.play()
+                    takeOverPlayback(index, expectedMediaId)
                     enrichUpcomingQueue(index)
                     extendDiscoverQueueIfNeeded(index)
                     preloadNextQueueItem(index)
@@ -2432,9 +2500,7 @@ class MusicPlayer @Inject constructor(
                             logStreamEvent("queue-prepare-yt-fallback", ytFallback, retry = 0)
                             cacheCurrentTrackStream(ytFallback)
                             player.replaceMediaItem(index, track.toMediaItem(ytFallback))
-                            player.seekToDefaultPosition(index)
-                            player.prepare()
-                            player.play()
+                            takeOverPlayback(index, expectedMediaId)
                             enrichUpcomingQueue(index)
                             extendDiscoverQueueIfNeeded(index)
                             preloadNextQueueItem(index)
@@ -2480,7 +2546,11 @@ class MusicPlayer @Inject constructor(
             persistPlaybackSession()
             return@onMain
         }
-        if (player.shuffleModeEnabled == enabled) return@onMain
+        // Converge BOTH flags: refresh() mirrors the engine flag into state
+        // on every player event, so returning early on engine-only equality
+        // leaves a stale state flag behind — the toggle then visibly flips
+        // back ("unsuffles itself") on the next event.
+        if (player.shuffleModeEnabled == enabled && _state.value.shuffleEnabled == enabled) return@onMain
         cancelCrossfade()
         player.shuffleModeEnabled = enabled
         preloadNextQueueItem(player.currentMediaItemIndex)
@@ -2585,6 +2655,10 @@ class MusicPlayer @Inject constructor(
         sleepTimerStep = 0
         player.stop()
         player.clearMediaItems()
+        // Shuffle is engine state that survives stop()/clearMediaItems(): without
+        // this reset the next fresh queue silently inherits shuffle while the
+        // fresh state says off — until the first refresh() flips it back on.
+        player.shuffleModeEnabled = false
         preparedStreams.clear()
         _state.value = MusicPlayerState()
         if (clearSession) clearPersistedPlaybackSession()
@@ -3309,6 +3383,136 @@ class MusicPlayer @Inject constructor(
             return
         }
         resolveAndPlayQueueItem(nextIndex)
+    }
+
+    /**
+     * Rendering watchdog: the progress bar is a wall clock and [refresh]
+     * preserves the playing flag while a track resolves, so the UI can show
+     * a normally-moving "playing" track while nothing audible comes out.
+     * Two shapes, both fixed by the same recovery a manual seek performs
+     * (renderer reset + fresh source):
+     *
+     * 1. Parked: ExoPlayer is not rendering at all — wedged placeholder
+     *    load, dead-but-not-erroring source after a window swap, or a stuck
+     *    IDLE/READY window, all with playWhenReady=true. Fires after
+     *    [RENDER_STALL_TIMEOUT_MS] with zero movement in position AND
+     *    buffer. A growing buffer means a slow network, which must never
+     *    be interrupted.
+     * 2. Inaudible: ExoPlayer reports rendering with an advancing position
+     *    yet no music stream is active system-wide
+     *    ([AudioManager.isMusicActive]) — output gated downstream of the
+     *    player (stale device route, dead exclusive session, wedged sink).
+     *    Fires after [INAUDIBLE_TIMEOUT_MS] of advancing-but-silent output.
+     *    USB-exclusive playback bypasses AudioTrack by design, so it is
+     *    excluded here (the parked branch still guards it).
+     *
+     * Never fires while a resolve/skip/crossfade owns the transition, on
+     * ENDED (owned by [handleNaturalTrackEnd]), while casting, paused, or
+     * with an error showing — healthy playback is never touched.
+     */
+    @MainThread
+    private fun updateRenderStallWatchdog(nowMs: Long) {
+        val snapshot = _state.value
+        val stalledWindow = player.currentMediaItemIndex
+        val mediaId = player.currentMediaItem?.mediaId
+        val windowOk = !isCasting &&
+            playerDelegate.isInitialized() &&
+            player.mediaItemCount > 0 &&
+            snapshot.isPlaying &&
+            snapshot.error == null &&
+            player.playWhenReady &&
+            playRequest?.isActive != true &&
+            unavailableSkipJob?.isActive != true &&
+            outgoingPlayer == null &&
+            stalledWindow != C.INDEX_UNSET &&
+            stalledWindow in 0 until player.mediaItemCount &&
+            mediaId != null &&
+            mediaId == snapshot.current?.mediaIdKey() &&
+            player.playbackState != Player.STATE_ENDED
+        // Null mediaId can't smart-cast through the flag above; re-check
+        // here so the recovery call below type-checks.
+        if (!windowOk || mediaId == null) {
+            renderStallSinceMs = 0L
+            inaudibleSinceMs = 0L
+            return
+        }
+        val posNow = runCatching { player.currentPosition }.getOrDefault(0L)
+        val bufNow = runCatching { player.bufferedPosition }.getOrDefault(0L)
+        val progressed = posNow != lastRenderPositionMs || bufNow != lastRenderBufferedMs
+        lastRenderPositionMs = posNow
+        lastRenderBufferedMs = bufNow
+        if (!player.isPlaying) {
+            // Parked branch: only a fully frozen loader counts as stalled.
+            inaudibleSinceMs = 0L
+            if (progressed) {
+                renderStallSinceMs = 0L
+                return
+            }
+            if (renderStallSinceMs == 0L) {
+                renderStallSinceMs = nowMs
+                return
+            }
+            if (nowMs - renderStallSinceMs < RENDER_STALL_TIMEOUT_MS) return
+            renderStallSinceMs = 0L
+            recoverSilentAdvance(stalledWindow, mediaId)
+            return
+        }
+        // Rendering branch: position must be advancing (else the parked
+        // branch above owns it) with no active music stream behind it.
+        renderStallSinceMs = 0L
+        val usbBypass = exclusiveUsbOutput.isActive()
+        val musicActive = usbBypass || runCatching { audioManager?.isMusicActive == true }.getOrDefault(true)
+        if (posNow == lastAdvancingPositionMs || musicActive) {
+            lastAdvancingPositionMs = posNow
+            if (musicActive) inaudibleSinceMs = 0L
+            return
+        }
+        lastAdvancingPositionMs = posNow
+        if (inaudibleSinceMs == 0L) {
+            inaudibleSinceMs = nowMs
+            return
+        }
+        if (nowMs - inaudibleSinceMs < INAUDIBLE_TIMEOUT_MS) return
+        inaudibleSinceMs = 0L
+        recoverSilentAdvance(stalledWindow, mediaId)
+    }
+
+    /**
+     * Tiered recovery for a window the watchdog proved silent. Attempt 1 on
+     * an already-resolved window mirrors the proven manual-seek rescue: a
+     * same-position seek resets the stalled renderers and re-opens the
+     * registered source without moving the playhead. Anything else (or a
+     * repeat stall) goes through the full lossless-first
+     * [resolveAndPlayQueueItem], which also covers expired/dead signed URLs
+     * with fresh ones. Capped per track; beyond that the existing
+     * error/unavailable machinery owns the window.
+     */
+    @MainThread
+    private fun recoverSilentAdvance(index: Int, mediaId: String) {
+        if (isCasting) return
+        if (!playerDelegate.isInitialized() || index !in 0 until player.mediaItemCount) return
+        if (_state.value.current?.mediaIdKey() != mediaId || !_state.value.isPlaying || _state.value.error != null) return
+        if (silentRecoveries.size > 64) silentRecoveries.clear()
+        val attempt = (silentRecoveries[mediaId] ?: 0) + 1
+        if (attempt > MAX_SILENT_RECOVERIES) return
+        silentRecoveries[mediaId] = attempt
+        val item = player.getMediaItemAt(index)
+        val prepared = item.localConfiguration?.customCacheKey?.let(preparedStreams::get)
+        val windowResolved = item.localConfiguration?.uri?.scheme != "lastwave" && prepared?.isExpired() != true
+        android.util.Log.w(
+            "MusicPlayer",
+            "Silent window '${_state.value.current?.title}' (attempt $attempt): " +
+                "state=${player.playbackState} playWhenReady=${player.playWhenReady} " +
+                "pos=${player.currentPosition}ms buf=${player.bufferedPosition}ms " +
+                "resolved=$windowResolved -> ${if (windowResolved && attempt == 1) "renderer reset" else "re-resolve"}",
+        )
+        if (windowResolved && attempt == 1) {
+            runCatching { player.seekTo(player.currentPosition.coerceAtLeast(0L)) }
+            if (player.playbackState == Player.STATE_IDLE) runCatching { player.prepare() }
+            runCatching { player.play() }
+            return
+        }
+        resolveAndPlayQueueItem(index)
     }
 
     @MainThread
@@ -4054,7 +4258,12 @@ class MusicPlayer @Inject constructor(
                 android.util.Log.i("MusicPlayer", "[PLAYBACK] local-download hit for '${track.title}' key=${localStream.cacheKey}")
                 localStream
             } else {
-                val losslessTimeoutMs = if (!videoId.isNullOrBlank()) 3_500L else 4_500L
+                val isDolbyPreferred = misc.dolbyAtmosEnabled || misc.losslessQuality == LosslessMusicApi.QUALITY_DOLBY_ATMOS
+                val losslessTimeoutMs = if (isDolbyPreferred) {
+                    if (!videoId.isNullOrBlank()) 6_500L else 7_500L
+                } else {
+                    if (!videoId.isNullOrBlank()) 3_500L else 4_500L
+                }
                 val losslessBudgetMs = losslessTimeoutMs - (SystemClock.elapsedRealtime() - forkStart)
                 val losslessStream: ResolvedStream? = if (!losslessAttempt) {
                     null
@@ -4072,11 +4281,28 @@ class MusicPlayer @Inject constructor(
                     }
                 }
 
-                losslessStream
-                    ?: runCatching { awaitYoutubeWithinBudget(youtubeDeferred, track, forkStart) }.getOrNull()
-                    ?: runCatching { youtubeDeferred.await() }.getOrNull()
-                    ?: runCatching { resolveYoutubeTrackAudioStream(track, videoId) }.getOrNull()
-                    ?: resolveYoutubeTrackAudioStream(track, null)
+                // Hard total cap for the YouTube fallback chain: the stages
+                // each carry their own budgets, but stacked end to end
+                // (promote budget + unbounded await + two fresh resolves,
+                // times the outer retry) they exceed a minute of spinner on
+                // a slow network. Past the cap, fail fast so the track
+                // errors and auto-skips instead of loading forever.
+                losslessStream ?: run {
+                    val remainingMs = YT_RESOLVE_TOTAL_TIMEOUT_MS - (SystemClock.elapsedRealtime() - forkStart)
+                    if (remainingMs <= 0L && !youtubeDeferred.isCompleted) {
+                        throw java.util.concurrent.TimeoutException(
+                            "YouTube resolve budget exhausted (${YT_RESOLVE_TOTAL_TIMEOUT_MS}ms) for '${track.title}'",
+                        )
+                    }
+                    withTimeoutOrNull(remainingMs.coerceAtLeast(0L)) {
+                        runCatching { awaitYoutubeWithinBudget(youtubeDeferred, track, forkStart) }.getOrNull()
+                            ?: runCatching { youtubeDeferred.await() }.getOrNull()
+                            ?: runCatching { resolveYoutubeTrackAudioStream(track, videoId) }.getOrNull()
+                            ?: resolveYoutubeTrackAudioStream(track, null)
+                    } ?: throw java.util.concurrent.TimeoutException(
+                        "YouTube resolve exceeded ${YT_RESOLVE_TOTAL_TIMEOUT_MS}ms total for '${track.title}'",
+                    )
+                }
             }
         } finally {
             youtubeDeferred.cancel()
@@ -4304,7 +4530,11 @@ class MusicPlayer @Inject constructor(
                     audioCodec = resolved.audioCodec,
                     isLossless = resolved.isLossless,
                     bitDepth = resolved.bitDepth,
-                    samplingRateKHz = resolved.samplingRateKHz,
+                    samplingRateKHz = if (decodedSampleRateHz > 0) {
+                        decodedSampleRateHz / 1000.0
+                    } else {
+                        resolved.samplingRateKHz ?: it.samplingRateKHz
+                    },
                     // Seed the progress denominator the moment the stream
                     // resolves instead of waiting for ExoPlayer to parse the
                     // container (which can lag 30-40s on throttled URLs and left
@@ -4785,7 +5015,28 @@ class MusicPlayer @Inject constructor(
     }
 
     private companion object {
+        /**
+         * Same-family fallback target when the DAC descriptor lacks the
+         * source rate. Integer-divide family first (88.2 -> 44.1 is exact,
+         * keeping conversion clean), else the highest supported rate below
+         * the source. Null = attempt native (supported, undisclosed, or
+         * unknown source): today's fail-onto-mixer behavior. Never
+         * upsample.
+         */
+        fun selectExclusiveRateFallback(sourceHz: Int?, supportedHz: List<Int>): Int? {
+            val src = sourceHz?.takeIf { it > 0 } ?: return null
+            val supported = supportedHz.filter { it > 0 }.toSet()
+            if (supported.isEmpty() || src in supported) return null
+            val below = supported.filter { it < src }
+            below.filter { src % it == 0 }.maxOrNull()?.let { return it }
+            return below.maxOrNull()
+        }
+
         const val YOUTUBE_PROMOTE_BUDGET_MS = 12_000L
+        /** Total cap for one YouTube fallback chain from fork, covering the
+         *  promote wait plus every stacked re-resolve. Normal resolves take
+         *  seconds; past this the track fails fast instead of spinning. */
+        const val YT_RESOLVE_TOTAL_TIMEOUT_MS = 30_000L
         const val DISCOVER_QUEUE_BATCH_SIZE = 16
         const val DISCOVER_QUEUE_REFILL_THRESHOLD = 8
         const val RADIO_QUEUE_BATCH_SIZE = 25
@@ -4813,6 +5064,19 @@ class MusicPlayer @Inject constructor(
         const val END_OF_TRACK_STALL_THRESHOLD_MS = 750L
         /** Debounce so STATE_ENDED + ticker watchdog can't churn generations. */
         const val AUTO_ADVANCE_DEBOUNCE_MS = 3_000L
+        /** UI-playing but ExoPlayer frozen (pos + buffer) this long means a
+         *  silent window, not slow loading — legit rebuffers advance the
+         *  buffer and reset the clock. Well above normal hitches, far below
+         *  a full silent track. */
+        const val RENDER_STALL_TIMEOUT_MS = 8_000L
+        /** Rendering with an advancing position yet no active music stream
+         *  this long means gated output, not a startup gap (those last a
+         *  second or two). User-muted-to-zero still counts as active, so
+         *  this never fires on a deliberately silent phone. */
+        const val INAUDIBLE_TIMEOUT_MS = 10_000L
+        /** Renderer-reset, then re-resolve. Beyond that the error/unavailable
+         *  machinery owns the window — never loop recovery forever. */
+        const val MAX_SILENT_RECOVERIES = 2
         const val PLAYBACK_RETRY_BASE_DELAY_MS = 350L
         const val PLAYBACK_RETRY_JITTER_MS = 250L
         const val MEDIA_STREAM_CACHE_BYTES = 64L * 1024 * 1024

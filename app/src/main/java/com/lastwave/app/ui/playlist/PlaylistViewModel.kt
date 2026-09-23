@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -129,7 +130,13 @@ class PlaylistViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            playlistRepository.changes.collect { load() }
+            // Debounced: a single drag-reorder fires one change per crossed
+            // row. Reloading on every one would yank the list mid-drag (full
+            // re-read + YT refresh + sync pass per row) and race the
+            // persists, so the order snaps back instead of sticking. The
+            // optimistic detail update keeps the row under the finger; one
+            // reload after the drag settles confirms the persisted order.
+            playlistRepository.changes.debounce(750L).collect { load() }
         }
         viewModelScope.launch {
             ytMusicLibraryManager.playlists.collect { remote ->
@@ -382,45 +389,6 @@ class PlaylistViewModel @Inject constructor(
         }
     }
 
-    fun moveTrack(playlistId: Long, fromIndex: Int, toIndex: Int) {
-        if (fromIndex == toIndex) return
-        if (playlistId < 0L) return
-        val current = _uiState.value.detailPlaylist?.takeIf { it.id == playlistId }
-            ?: _uiState.value.playlists.firstOrNull { it.id == playlistId }
-            ?: return
-        if (fromIndex !in current.tracks.indices || toIndex !in current.tracks.indices) return
-        val reordered = current.tracks.toMutableList().apply { add(toIndex, removeAt(fromIndex)) }
-        _uiState.update { state ->
-            state.copy(
-                detailPlaylist = if (state.detailPlaylist?.id == playlistId) {
-                    state.detailPlaylist?.copy(tracks = reordered)
-                } else {
-                    state.detailPlaylist
-                },
-                playlists = state.playlists.map { playlist ->
-                    if (playlist.id == playlistId) playlist.copy(tracks = reordered) else playlist
-                },
-            )
-        }
-        viewModelScope.launch {
-            runCatching { playlistRepository.moveTrack(playlistId, fromIndex, toIndex) }
-                .getOrNull()?.let { saved ->
-                    _uiState.update { state ->
-                        state.copy(
-                            detailPlaylist = if (state.detailPlaylist?.id == playlistId) {
-                                saved
-                            } else {
-                                state.detailPlaylist
-                            },
-                            playlists = state.playlists.map { playlist ->
-                                if (playlist.id == playlistId) saved else playlist
-                            },
-                        )
-                    }
-                }
-        }
-    }
-
     fun removeTrack(playlistId: Long, index: Int) {
         val before = _uiState.value.detailPlaylist?.takeIf { it.id == playlistId }
         if (playlistId < 0L && before != null && index in before.tracks.indices) {
@@ -447,6 +415,52 @@ class PlaylistViewModel @Inject constructor(
                 )
             }
             if (playlistId >= 0L) load()
+        }
+    }
+
+    /**
+     * Permanent drag-reorder for local playlists. Updates the open detail
+     * immediately (so the row stays under the finger) then persists the new
+     * order to Room. YouTube-only playlists have no remote move API, so they
+     * stay locked.
+     */
+    fun moveTrack(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        if (fromIndex == toIndex) return
+        if (playlistId < 0L) {
+            _uiState.update { it.copy(toastMessage = "Reorder works for local playlists") }
+            return
+        }
+        val current = _uiState.value.detailPlaylist?.takeIf { it.id == playlistId } ?: return
+        if (fromIndex !in current.tracks.indices || toIndex !in current.tracks.indices) return
+        val reordered = current.tracks.toMutableList().apply {
+            add(toIndex, removeAt(fromIndex))
+        }
+        _uiState.update { state ->
+            state.copy(
+                detailPlaylist = current.copy(tracks = reordered),
+                playlists = state.playlists.map { playlist ->
+                    if (playlist.id == playlistId) playlist.copy(tracks = reordered) else playlist
+                },
+            )
+        }
+        viewModelScope.launch {
+            runCatching { playlistRepository.moveTrack(playlistId, fromIndex, toIndex) }
+                .onSuccess { persisted ->
+                    if (persisted != null) {
+                        _uiState.update { state ->
+                            state.copy(
+                                detailPlaylist = if (state.detailPlaylist?.id == playlistId) persisted else state.detailPlaylist,
+                                playlists = state.playlists.map { playlist ->
+                                    if (playlist.id == playlistId) persisted else playlist
+                                },
+                            )
+                        }
+                    }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(toastMessage = "Couldn't save new order") }
+                    loadDetail(playlistId)
+                }
         }
     }
 

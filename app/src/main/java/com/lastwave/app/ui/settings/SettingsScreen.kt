@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BubbleChart
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -444,7 +445,8 @@ fun SettingsScreen(
                     // the channel list was loaded, otherwise the stored name.
                     val currentChannelName = ytChannels.firstOrNull {
                         it.channelId == ytConnection.onBehalfOfUser &&
-                            it.authUserIndex == ytConnection.authUserIndex
+                            it.authUserIndex == ytConnection.authUserIndex &&
+                            it.pageId == ytConnection.pageId
                     }?.accountName ?: ytConnection.accountName
                     val ytRowCount = if (ytConnected) 7 else 2
                     SettingsGroup(rowCount = ytRowCount) { index, position ->
@@ -1265,7 +1267,7 @@ fun SettingsScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_about))
-                    SettingsGroup(rowCount = 3) { index, position ->
+                    SettingsGroup(rowCount = 4) { index, position ->
                         when (index) {
                             0 -> SettingsActionCard(
                                 icon = Icons.AutoMirrored.Filled.Send,
@@ -1281,9 +1283,23 @@ fun SettingsScreen(
                                 position = position,
                             )
                             1 -> SettingsActionCard(
-                                icon = Icons.Filled.AutoAwesome,
+                                icon = Icons.Filled.Group,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = "Discord Support",
+                                subtitle = "Join our Discord community",
+                                onClick = {
+                                    val discordIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://discord.gg/TMCEPSUNk2"))
+                                    if (!startActivitySafely(context, discordIntent)) {
+                                        viewModel.showToast("No compatible browser is available")
+                                    }
+                                },
+                                position = position,
+                            )
+                            2 -> SettingsActionCard(
+                                icon = Icons.Filled.AutoAwesome,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
                                 title = stringResource(R.string.settings_more_from_us),
                                 subtitle = "Join @MaterialYouApp on Telegram",
                                 onClick = {
@@ -1293,7 +1309,7 @@ fun SettingsScreen(
                                 },
                                 position = position,
                             )
-                            2 -> SettingsActionCard(
+                            3 -> SettingsActionCard(
                                 icon = Icons.Filled.Code,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1646,6 +1662,7 @@ fun SettingsScreen(
             isLoading = ytChannelsLoading,
             selectedChannelId = ytConnection.onBehalfOfUser,
             selectedAuthUser = ytConnection.authUserIndex,
+            selectedPageId = ytConnection.pageId,
             onReload = viewModel::loadYtChannels,
             onSelect = {
                 viewModel.selectYtChannel(it)
@@ -1990,11 +2007,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.1.1"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.0"
 } catch (error: Exception) {
-    "4.1.1"
+    "4.2.0"
 } catch (error: LinkageError) {
-    "4.1.1"
+    "4.2.0"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a
@@ -3629,6 +3646,7 @@ private fun YouTubeChannelSheet(
     isLoading: Boolean,
     selectedChannelId: String?,
     selectedAuthUser: Int?,
+    selectedPageId: String = "",
     onReload: () -> Unit,
     onSelect: (com.lastwave.app.data.music.YtChannelOption) -> Unit,
     onDismiss: () -> Unit,
@@ -3723,11 +3741,12 @@ private fun YouTubeChannelSheet(
                     ) {
                         items(channels.size, key = { index ->
                             val c = channels[index]
-                            "${c.channelId}|${c.authUserIndex}|${c.accountName}"
+                            "${c.channelId}|${c.authUserIndex}|${c.pageId}|${c.accountName}"
                         }) { index ->
                             val channel = channels[index]
                             val isSelected = channel.channelId == selectedChannelId &&
-                                channel.authUserIndex == selectedAuthUser
+                                channel.authUserIndex == selectedAuthUser &&
+                                channel.pageId == selectedPageId
                             Surface(
                                 onClick = {
                                     haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)

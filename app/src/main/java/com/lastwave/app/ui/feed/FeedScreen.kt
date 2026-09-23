@@ -114,6 +114,8 @@ import com.lastwave.app.ui.common.ArtworkImage
 import com.lastwave.app.ui.common.ExpressiveHeader
 import com.lastwave.app.ui.common.HeaderActionIcon
 import com.lastwave.app.ui.common.TrackContextMenuSheet
+import com.lastwave.app.ui.common.TrackMiniTrayData
+import com.lastwave.app.ui.common.TrackMiniTraySheet
 import com.lastwave.app.ui.common.WindowSizeClass
 import com.lastwave.app.ui.common.rememberWindowSizeClass
 import com.lastwave.app.ui.common.TrackMenuCapabilities
@@ -154,6 +156,8 @@ fun FeedScreen(
     val musicPlayer = LocalMusicPlayer.current
     val playbackState by musicPlayer.chromeState.collectAsStateWithLifecycle()
     var menuTrack by remember { mutableStateOf<YouTubeMusicTrack?>(null) }
+    // Long-press (deep press) mini tray — 3-dot buttons keep the full sheet.
+    var miniTrayTrack by remember { mutableStateOf<TrackMiniTrayData?>(null) }
     // Sections hidden via Settings → Home sections.
     val hiddenSections by viewModel.hiddenHomeSections.collectAsStateWithLifecycle()
     fun isSectionVisible(section: HomeSection) = section.id !in hiddenSections
@@ -366,6 +370,17 @@ fun FeedScreen(
                                 isPlaying = playbackState.isPlaying,
                                 onTrackClick = { index -> viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
                                 onMenuClick = { menuTrack = it },
+                                onLongClick = { track, index ->
+                                    miniTrayTrack = TrackMiniTrayData(
+                                        title = track.title,
+                                        artist = track.artist,
+                                        album = track.album,
+                                        artworkUrl = track.artworkUrl,
+                                        videoId = track.videoId.takeIf(String::isNotBlank),
+                                        sourceLabel = "Home",
+                                        onPlay = { viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
+                                    )
+                                },
                             )
                         
                                 }
@@ -399,6 +414,17 @@ fun FeedScreen(
                                             artworkUrl = track.artworkUrl,
                                             fallbackIcon = Icons.Filled.MusicNote,
                                             onClick = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                            onLongClick = {
+                                                miniTrayTrack = TrackMiniTrayData(
+                                                    title = track.title,
+                                                    artist = track.artist,
+                                                    album = track.album,
+                                                    artworkUrl = track.artworkUrl,
+                                                    videoId = track.videoId.takeIf(String::isNotBlank),
+                                                    sourceLabel = "Home",
+                                                    onPlay = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                                )
+                                            },
                                             onPlayClick = { viewModel.playTracksQueue(section.items, index, section.title) },
                                         )
                                     }
@@ -436,7 +462,17 @@ fun FeedScreen(
                                                     artworkUrl = track.artworkUrl,
                                                     fallbackIcon = Icons.Filled.Whatshot,
                                                     badgeText = "NEW",
-                                                    onLongClick = { menuTrack = track },
+                                                    onLongClick = {
+                                                        miniTrayTrack = TrackMiniTrayData(
+                                                            title = track.title,
+                                                            artist = track.artist,
+                                                            album = track.album,
+                                                            artworkUrl = track.artworkUrl,
+                                                            videoId = track.videoId.takeIf(String::isNotBlank),
+                                                            sourceLabel = "Home",
+                                                            onPlay = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
+                                                        )
+                                                    },
                                                     onClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
                                                     onPlayClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
                                                 )
@@ -469,6 +505,15 @@ fun FeedScreen(
                                         RecentTrackCard(
                                             track = track,
                                             onClick = { viewModel.playRecentQueue(state.feedData.jumpBackIn, index) },
+                                            onLongClick = {
+                                                miniTrayTrack = TrackMiniTrayData(
+                                                    title = track.name,
+                                                    artist = track.artist.displayName,
+                                                    artworkUrl = track.artworkUrl,
+                                                    sourceLabel = "Home",
+                                                    onPlay = { viewModel.playRecentQueue(state.feedData.jumpBackIn, index) },
+                                                )
+                                            },
                                         )
                                     }
                                 },
@@ -591,6 +636,15 @@ fun FeedScreen(
                                             artworkUrl = track.artworkUrl,
                                             fallbackIcon = Icons.Filled.MusicNote,
                                             onClick = { viewModel.playGeneratedQueue(state.feedData.heavyRotation, index, "Heavy Rotation") },
+                                            onLongClick = {
+                                                miniTrayTrack = TrackMiniTrayData(
+                                                    title = track.name,
+                                                    artist = track.artist,
+                                                    artworkUrl = track.artworkUrl,
+                                                    sourceLabel = "Home",
+                                                    onPlay = { viewModel.playGeneratedQueue(state.feedData.heavyRotation, index, "Heavy Rotation") },
+                                                )
+                                            },
                                             onPlayClick = { viewModel.playGeneratedQueue(state.feedData.heavyRotation, index, "Heavy Rotation") },
                                         )
                                     }
@@ -665,6 +719,17 @@ fun FeedScreen(
                                         rank = index + 1,
                                         track = track,
                                         onClick = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                        onLongClick = {
+                                            miniTrayTrack = TrackMiniTrayData(
+                                                title = track.title,
+                                                artist = track.artist,
+                                                album = track.album,
+                                                artworkUrl = track.artworkUrl,
+                                                videoId = track.videoId.takeIf(String::isNotBlank),
+                                                sourceLabel = "Home",
+                                                onPlay = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                            )
+                                        },
                                     )
                                 }
                             }
@@ -780,6 +845,13 @@ fun FeedScreen(
             ),
             playbackSourceLabel = "Home",
             onDismiss = { menuTrack = null },
+        )
+    }
+
+    miniTrayTrack?.let { tray ->
+        TrackMiniTraySheet(
+            data = tray,
+            onDismiss = { miniTrayTrack = null },
         )
     }
 }
@@ -1241,6 +1313,7 @@ private fun QuickTileCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun QuickPicksRows(
     tracks: List<YouTubeMusicTrack>,
@@ -1248,8 +1321,10 @@ private fun QuickPicksRows(
     isPlaying: Boolean,
     onTrackClick: (Int) -> Unit,
     onMenuClick: (YouTubeMusicTrack) -> Unit,
+    onLongClick: (YouTubeMusicTrack, Int) -> Unit = { _, _ -> },
 ) {
     val sizeClass = rememberWindowSizeClass()
+    val haptics = LocalHapticFeedback.current
     val widthFraction = when (sizeClass) {
         WindowSizeClass.COMPACT -> 0.88f
         WindowSizeClass.MEDIUM -> 0.48f
@@ -1270,12 +1345,19 @@ private fun QuickPicksRows(
                     val overallIndex = columnIndex * 3 + rowIndex
                     val isCurrent = track.videoId.isNotBlank() && track.videoId == currentPlayingVideoId
                     Surface(
-                        onClick = { onTrackClick(overallIndex) },
                         shape = RoundedCornerShape(18.dp),
                         color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                         else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.65f),
                         border = null,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onTrackClick(overallIndex) },
+                                onLongClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onLongClick(track, overallIndex)
+                                },
+                            ),
                     ) {
                         Row(
                             modifier = Modifier
@@ -1379,15 +1461,14 @@ private fun FeedMediaCard(
             ),
     ) {
         Box(modifier = Modifier.size(cardWidth)) {
+            // No onClick here on purpose: the outer Column's combinedClickable
+            // owns tap + long-press for the whole card. An inner clickable
+            // Surface would swallow the press and starve the long-press tray.
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 1.dp,
                 modifier = Modifier.fillMaxSize(),
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onClick()
-                },
             ) {
                 Box(Modifier.fillMaxSize()) {
                     ArtworkImage(
@@ -1418,17 +1499,25 @@ private fun FeedMediaCard(
             }
             if (onPlayClick != null) {
                 Surface(
-                    onClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onPlayClick()
-                    },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.primaryContainer,
                     shadowElevation = 6.dp,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(end = 8.dp, bottom = 8.dp)
-                        .size(38.dp),
+                        .size(38.dp)
+                        .combinedClickable(
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onPlayClick()
+                            },
+                            onLongClick = onLongClick?.let { tray ->
+                                {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    tray()
+                                }
+                            },
+                        ),
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
@@ -1485,21 +1574,33 @@ private fun FeedPlaylistCard(
 // Legacy card variants were consolidated into FeedMediaCard / FeedPlaylistCard
 // so every shelf shares one artwork, type and play-affordance language.
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecentTrackCard(
     track: RecentTrack,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val ago = remember(track.date?.uts, track.url) { relativeTime(track.date?.uts) }
     val primaryArtistName = remember(track.artist.displayName) { ArtistHelper.primaryArtist(track.artist.displayName) }
     val subtitle = if (ago != null) "$primaryArtistName · $ago" else primaryArtistName
+    val haptics = LocalHapticFeedback.current
     Column(
         modifier = Modifier
             .width(148.dp)
-            .clickable(
+            .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClick = onClick,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onClick()
+                },
+                onLongClick = onLongClick?.let {
+                    {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        it()
+                    }
+                },
             ),
     ) {
         Surface(
@@ -1507,7 +1608,6 @@ private fun RecentTrackCard(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 1.dp,
             modifier = Modifier.size(148.dp),
-            onClick = onClick,
         ) {
             Box(Modifier.fillMaxSize()) {
                 ArtworkImage(
@@ -1558,19 +1658,17 @@ private fun RecentTrackCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChartTrackCard(
     rank: Int,
     track: YouTubeMusicTrack,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val isTop3 = rank <= 3
     val haptics = LocalHapticFeedback.current
     Surface(
-        onClick = {
-            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            onClick()
-        },
         shape = RoundedCornerShape(18.dp),
         color = if (isTop3) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
         else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.7f),
@@ -1581,7 +1679,19 @@ private fun ChartTrackCard(
         ),
         modifier = Modifier
             .width(288.dp)
-            .height(76.dp),
+            .height(76.dp)
+            .combinedClickable(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onClick()
+                },
+                onLongClick = onLongClick?.let {
+                    {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        it()
+                    }
+                },
+            ),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1601,10 +1711,6 @@ private fun ChartTrackCard(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHighest,
                 modifier = Modifier.size(56.dp),
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onClick()
-                },
             ) {
                 Box(Modifier.fillMaxSize()) {
                     ArtworkImage(
