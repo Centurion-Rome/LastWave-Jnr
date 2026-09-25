@@ -43,7 +43,8 @@ fun safeDrawingBottomPadding(): Dp =
 @Composable
 fun EdgeToEdgeDialogWindow() {
     val view = LocalView.current
-    DisposableEffect(view) {
+    val liquidGlass = com.lastwave.app.ui.theme.LocalLiquidGlass.current
+    DisposableEffect(view, liquidGlass) {
         var dialogWindow: Window? = null
         var isDialog = false
 
@@ -98,13 +99,16 @@ fun EdgeToEdgeDialogWindow() {
                 }
                 if (isDialog) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        // Liquid glass reads better with a wider, softer blur; the
+                        // plain scrim keeps the tighter radius and heavier dim.
+                        val radius = if (liquidGlass) 150 else 120
                         w.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
                         val lp = w.attributes
-                        lp.setBlurBehindRadius(120)
+                        lp.setBlurBehindRadius(radius)
                         w.attributes = lp
-                        runCatching { w.setBackgroundBlurRadius(120) }
+                        runCatching { w.setBackgroundBlurRadius(radius) }
                     }
-                    w.setDimAmount(0.28f)
+                    w.setDimAmount(if (liquidGlass) 0.18f else 0.28f)
                 }
             }
         }

@@ -672,7 +672,18 @@ fun PlayerHost(
             Box(Modifier.fillMaxSize().liquidGlassSource(if (miniGlass) miniBackdrop else null)) {
                 content()
             }
-            if (miniPlayerVisible) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = miniPlayerVisible,
+                enter = androidx.compose.animation.slideInVertically(
+                    animationSpec = ExpressiveMotion.smoothSpring(),
+                    initialOffsetY = { it },
+                ) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)),
+                exit = androidx.compose.animation.slideOutVertically(
+                    animationSpec = ExpressiveMotion.smoothSpring(),
+                    targetOffsetY = { it },
+                ) + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(150)),
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
                 MiniPlayer(
                     state = state,
                     progressState = viewModel.progressState,
@@ -684,7 +695,6 @@ fun PlayerHost(
                     bottomPadding = if (hasBottomNavigation) 92.dp else 12.dp,
                     edgeToEdge = !hasBottomNavigation,
                     backdrop = if (miniGlass) miniBackdrop else null,
-                    modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
             if (activeDownloads.isNotEmpty() && !expanded) {
@@ -1177,6 +1187,7 @@ private fun AddToPlaylistDialog(
 ) {
     val sanitizedPlaylists = remember(playlists) { playlists.distinctBy { it.id } }
     var newPlaylistName by remember(track) { mutableStateOf("") }
+    var showNewPlaylistDialog by remember(track) { mutableStateOf(false) }
     var selectedPlaylistIds by remember(track) { mutableStateOf(emptySet<Long>()) }
     var duplicateConfirmation by remember(track) { mutableStateOf<Set<Long>?>(null) }
     var duplicatePlaylistIds by remember(track) { mutableStateOf(emptySet<Long>()) }
@@ -1448,11 +1459,20 @@ private fun AddToPlaylistDialog(
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
-                androidx.compose.material3.IconButton(onClick = { showCreateDialog = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Create Playlist")
+                Surface(
+                    onClick = { showCreateDialog = true },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Add, contentDescription = "Create Playlist")
+                    }
                 }
                 androidx.compose.material3.IconButton(onClick = { onDismiss() }) {
                     Icon(Icons.Filled.Close, contentDescription = "Close")
+                }
                 }
             }
 
@@ -2702,7 +2722,7 @@ internal fun PlayerProgressSlider(
                 color = inactive,
                 start = androidx.compose.ui.geometry.Offset(startX, centerY),
                 end = androidx.compose.ui.geometry.Offset(endX, centerY),
-                strokeWidth = 3.dp.toPx(),
+                strokeWidth = if (liquidGlass) 4.dp.toPx() else 3.dp.toPx(),
                 cap = StrokeCap.Round,
             )
             if (activeEndX > startX) {
@@ -2710,14 +2730,14 @@ internal fun PlayerProgressSlider(
                     brush = Brush.horizontalGradient(
                         colors = listOf(
                             primary.copy(alpha = if (enabled) 1f else 0.42f),
-                            tertiary.copy(alpha = if (enabled) 0.92f else 0.36f),
+                            activeTrackEndColor.copy(alpha = if (enabled) 0.92f else 0.36f),
                         ),
                         startX = startX,
                         endX = activeEndX,
                     ),
                     start = androidx.compose.ui.geometry.Offset(startX, centerY),
                     end = androidx.compose.ui.geometry.Offset(activeEndX, centerY),
-                    strokeWidth = 4.dp.toPx(),
+                    strokeWidth = if (liquidGlass) 5.dp.toPx() else 4.dp.toPx(),
                     cap = StrokeCap.Round,
                 )
             }
@@ -2728,7 +2748,7 @@ internal fun PlayerProgressSlider(
             inactiveTrackColor = Color.Transparent,
             activeTickColor = Color.Transparent,
             inactiveTickColor = Color.Transparent,
-            disabledThumbColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.34f),
+            disabledThumbColor = (if (liquidGlass) Color.White else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.34f),
             disabledActiveTrackColor = Color.Transparent,
             disabledInactiveTrackColor = Color.Transparent,
             disabledActiveTickColor = Color.Transparent,
