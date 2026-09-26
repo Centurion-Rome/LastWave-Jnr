@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.2.2] - 2026-09-26
+
+### Changed
+- **Merged upstream 4.2.1:** Pulled in `Clash-Projects/LastWave-Native` v4.2.1 — true bit-perfect USB audio pipeline, dual-crystal UAC2 clock switching with smart sample-rate fallback, fluid artwork background, Large Now Playing widget, addon system with native request signing, and five new lyrics providers with TTML syllable parsing.
+- **Analog VU Meter:** Backlight gradient flipped to a vintage lamp-lit face — deep amber at the top of the dial washing out to pale yellow at the bottom, with the shading overlay moved to the top so the bright lower half stays luminous.
+
+### Fixed
+- **Playlist drag reorder:** Upstream renamed the track key list to `displayKeys` (now aligned to display order), which broke the fork's key-based reorder lookup and broke the build. Drag now keeps the key-based lookup *and* upstream's `runCatching` guards around `layoutInfo` reads at the viewport edge.
+
+### Notes
+- Upstream removed the `USB_DEVICE_ATTACHED` intent-filter from the main activity, so the app no longer auto-claims a USB DAC on plug-in.
+- The dead native key getters were removed upstream (`NativeSecrets.baseUrl`/`apiKey`, `NativeModuleKey`, `ModuleCrypto.appKeyId`). Builds now need `ADDON_CLIENT_SECRET` supplied by CI, and encrypted `.lwp` module configs are rejected.
+
 ## [4.2.1] - 2026-09-26
 
 ### Added
