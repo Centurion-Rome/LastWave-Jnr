@@ -292,13 +292,13 @@ fun PlaylistDetailScreen(
         dragOffsetY = 0f
     }
     // pointerInput(stableKey) below does NOT restart when the list reorders,
-    // so its onDrag closure must not capture trackKeys/displayTracks directly:
+    // so its onDrag closure must not capture displayKeys/displayTracks directly:
     // after the first move that snapshot is stale and the drag can only bounce
     // between two neighbours. rememberUpdatedState keeps the closure reading
     // the latest list so the held item travels the full distance. Key-based
     // lookup also avoids header-offset assumptions (hero + VU + hint items
     // shift lazy indices, so index arithmetic like source+1 is fragile).
-    val latestTrackKeys by rememberUpdatedState(trackKeys)
+    val latestDisplayKeys by rememberUpdatedState(displayKeys)
     val latestDisplayCount by rememberUpdatedState(displayTracks.size)
     val scrollOffset by remember {
         derivedStateOf {
@@ -794,11 +794,11 @@ fun PlaylistDetailScreen(
                                                         if (visible.isEmpty()) return@detectDragGestures
                                                         // Key-based lookup (no header-offset assumptions: hero,
                                                         // VU meter and the sort-hint items shift lazy indices).
-                                                        // latestTrackKeys: pointerInput(stableKey) outlives
-                                                        // recompositions, so the captured trackKeys would be
+                                                        // latestDisplayKeys: pointerInput(stableKey) outlives
+                                                        // recompositions, so the captured displayKeys would be
                                                         // stale after the first move and the drag could only
                                                         // bounce between two neighbours.
-                                                        val keys = latestTrackKeys
+                                                        val keys = latestDisplayKeys
                                                         val count = latestDisplayCount
                                                         val sourceKey = keys.getOrNull(source)
                                                             ?: return@detectDragGestures

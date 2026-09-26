@@ -91,8 +91,8 @@ Built with **Material 3 Expressive**, LastWave combines effortless ad-free strea
 ## <img src="https://api.iconify.design/lucide:terminal.svg?color=%23C6F100" width="20" height="20" align="center" /> Building from Source
 
 ```bash
-git clone https://github.com/Clash-Projects/LastWave-native.git
-cd LastWave-native
+git clone https://github.com/Centurion-Rome/LastWave-Jnr.git
+cd LastWave-Jnr
 ./gradlew assembleRelease
 ```
 
