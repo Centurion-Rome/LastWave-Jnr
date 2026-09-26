@@ -1410,9 +1410,9 @@ fun SettingsScreen(
                         iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                         iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
                                 title = stringResource(R.string.settings_source_code),
-                        subtitle = "github.com/Clash-Projects/LastWave-native",
+                        subtitle = "github.com/Centurion-Rome/LastWave-Jnr",
                         onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Clash-Projects/LastWave-native"))
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Centurion-Rome/LastWave-Jnr"))
                             if (!startActivitySafely(context, intent)) {
                                 viewModel.showToast("No browser is available")
                             }
