@@ -136,13 +136,15 @@ fun AnalogVuMeter(
             val w = size.width
             val h = size.height
 
-            // Glowing yellow-orange back.
+            // Vintage backlight: the warm incandescent face glows deep amber
+            // near the top of the dial and washes out to pale yellow at the
+            // bottom, the way an old lamp-lit VU face reads.
             drawRect(
                 brush = Brush.verticalGradient(
-                    0f to Color(0xFFFFF3C4),
-                    0.45f to Color(0xFFFFD97A),
-                    0.78f to Color(0xFFFFB02E),
-                    1f to Color(0xFFF68B1A),
+                    0f to Color(0xFFF68B1A),
+                    0.45f to Color(0xFFFFB02E),
+                    0.78f to Color(0xFFFFD97A),
+                    1f to Color(0xFFFFF3C4),
                 ),
                 size = size,
             )
@@ -158,11 +160,13 @@ fun AnalogVuMeter(
                 radius = w * 0.55f,
                 center = Offset(w * 0.5f, h * 0.12f),
             )
-            // Bottom warmth so the pivot area never looks muddy.
+            // Top shading so the deep amber band has depth instead of reading
+            // flat. Kept off the bottom, which stays the bright yellow part of
+            // the lamp wash.
             drawRect(
                 brush = Brush.verticalGradient(
-                    0f to Color.Transparent,
-                    1f to Color(0xFFB25A00).copy(alpha = 0.28f),
+                    0f to Color(0xFFB25A00).copy(alpha = 0.28f),
+                    1f to Color.Transparent,
                 ),
                 size = size,
             )
