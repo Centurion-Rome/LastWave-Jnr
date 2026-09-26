@@ -955,7 +955,7 @@ fun SettingsScreen(
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
                                 title = "Dolby Atmos / Spatial Audio",
                                 subtitle = if (misc.dolbyAtmosEnabled) {
-                                    "Direct Tidal multi-channel spatial audio (skips Qobuz)"
+                                    "Direct multi-channel spatial audio"
                                 } else {
                                     "Off \u2022 Streams standard stereo lossless audio"
                                 },
@@ -1674,7 +1674,7 @@ fun SettingsScreen(
 
     if (showQualityDialog) {
         val tiers = listOf(
-            Triple(28, "Dolby Atmos", "Spatial Immersive Audio • Tidal Master" to "ATMOS"),
+            Triple(28, "Dolby Atmos", "Spatial Immersive Audio • Master Audio" to "ATMOS"),
             Triple(27, "Max Quality", "Up to 24-bit / 192 kHz • Lossless Studio FLAC" to "24-BIT / 192k"),
             Triple(7, "Hi-Res Audio", "24-bit / 96 kHz • Lossless Studio FLAC" to "24-BIT / 96k"),
             Triple(6, "CD Lossless", "16-bit / 44.1 kHz • Lossless CD FLAC" to "16-BIT / 44.1k"),
@@ -1824,7 +1824,7 @@ fun SettingsScreen(
 
     if (showDownloadQualityDialog) {
         val downloadTiers = listOf(
-            Triple(28, "Dolby Atmos", "Spatial Immersive Audio • Tidal Master" to "ATMOS"),
+            Triple(28, "Dolby Atmos", "Spatial Immersive Audio • Master Audio" to "ATMOS"),
             Triple(27, "Max Quality", "Up to 24-bit / 192 kHz • Studio Master FLAC" to "24-BIT / 192k"),
             Triple(7, "Hi-Res Audio", "24-bit / 96 kHz • Studio FLAC" to "24-BIT / 96k"),
             Triple(6, "CD Lossless", "16-bit / 44.1 kHz • Bit-Exact CD FLAC" to "16-BIT / 44.1k"),
@@ -2007,11 +2007,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.0"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.1"
 } catch (error: Exception) {
-    "4.2.0"
+    "4.2.1"
 } catch (error: LinkageError) {
-    "4.2.0"
+    "4.2.1"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a
@@ -2161,6 +2161,8 @@ private fun SettingsToggleCard(
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium,
                     color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
                 Text(
                     subtitle,
@@ -2351,7 +2353,7 @@ private fun SettingsActionCard(
             IconBadge(icon, iconContainer, iconTint)
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = titleColor)
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = titleColor, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
             Icon(

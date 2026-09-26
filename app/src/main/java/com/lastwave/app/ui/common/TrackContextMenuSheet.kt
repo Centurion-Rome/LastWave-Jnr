@@ -83,6 +83,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lastwave.app.ui.generate.MixLauncher
 import com.lastwave.app.ui.theme.LocalLiquidGlass
+import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.playback.PlayableTrack
 import com.lastwave.app.ui.navigation.ArtistAlbumNavigator
 import com.lastwave.app.ui.player.LocalMusicPlayer
@@ -157,8 +158,22 @@ class DownloadMenuViewModel @Inject constructor(
         return TrackDownloadStatus.NOT_DOWNLOADED
     }
 
-    fun download(title: String, artist: String, album: String? = null, artworkUrl: String? = null) {
-        downloadManager.downloadTrack(title, artist, album, artworkUrl)
+    fun download(
+        title: String,
+        artist: String,
+        album: String? = null,
+        artworkUrl: String? = null,
+        videoId: String? = null,
+        durationMs: Long? = null,
+    ) {
+        downloadManager.downloadTrack(
+            title = title,
+            artist = artist,
+            album = album,
+            artworkUrl = artworkUrl,
+            videoId = videoId,
+            durationMs = durationMs,
+        )
     }
 }
 
@@ -316,6 +331,8 @@ fun TrackContextMenuSheet(
             artist = target.artist,
             album = playable.album,
             artworkUrl = playable.artworkUrl,
+            videoId = playable.videoId,
+            durationMs = playable.durationMs,
             onDismiss = {
                 showDetailsSheet = false
                 onDismiss()
@@ -378,14 +395,13 @@ fun TrackContextMenuSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
+        modifier = if (LocalLiquidGlass.current) Modifier.liquidGlassChrome(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp), true) else Modifier,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        // Liquid-glass sheet: the window behind is already blurred by
-        // EdgeToEdgeDialogWindow (blur-behind, API 31+), so the solid panel
-        // just hides it. Go transparent + lighter scrim and every row card
-        // floats on its own over the blurred content. Glass off keeps the
-        // classic solid panel.
-        containerColor = if (LocalLiquidGlass.current) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLow,
-        scrimColor = if (LocalLiquidGlass.current) Color.Black.copy(alpha = 0.12f) else BottomSheetDefaults.ScrimColor,
+        // The background behind is smoothly blurred by EdgeToEdgeDialogWindow.
+        // A translucent/transparent container lets the soft blur shine through
+        // while the individual action cards float with clean contrast on top.
+        containerColor = if (LocalLiquidGlass.current) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.65f),
+        scrimColor = Color.Black.copy(alpha = 0.32f),
         contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
         dragHandle = {
             Surface(
@@ -487,7 +503,14 @@ fun TrackContextMenuSheet(
                             }
                             else -> {
                                 MenuActionRow(Icons.Filled.Download, downloadLabel, position = pos) {
-                                    downloadViewModel.download(t.name, t.artist, playable.album, playable.artworkUrl)
+                                    downloadViewModel.download(
+                                        title = t.name,
+                                        artist = t.artist,
+                                        album = playable.album,
+                                        artworkUrl = playable.artworkUrl,
+                                        videoId = playable.videoId,
+                                        durationMs = playable.durationMs,
+                                    )
                                     onDismiss()
                                 }
                             }

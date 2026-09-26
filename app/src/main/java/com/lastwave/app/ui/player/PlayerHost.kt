@@ -208,6 +208,7 @@ import com.lastwave.app.data.local.LyricsUiVersion
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.MusicPlayerState
 import com.lastwave.app.playback.PlaybackChromeState
+import com.lastwave.app.playback.formatSampleRateKHz
 import com.lastwave.app.playback.isSpatialAudioCodec
 import com.lastwave.app.playback.qualityBadgeLabel
 import com.lastwave.app.playback.PlaybackProgressState
@@ -341,7 +342,7 @@ class PlayerViewModel @Inject constructor(
                 player.chromeState.map { it.current }.distinctUntilChanged(),
                 settingsPreferences.settings.map { it.wordByWordLyrics }.distinctUntilChanged(),
             ) { track, wordByWord -> track to wordByWord }.collect { (track, wordByWord) ->
-                val key = track?.let { "${it.artist}|${it.title}|$wordByWord" }
+                val key = track?.let { "${it.videoId ?: ""}|${it.artist}|${it.title}|$wordByWord" }
                 if (key != currentTrackLyricsKey) {
                     currentTrackLyricsKey = key
                     if (track != null) {
@@ -392,8 +393,14 @@ class PlayerViewModel @Inject constructor(
 
                 val result = try {
                     lyricsRepository.getLyrics(
-                        track.title, track.artist, track.album, durationSeconds, forceRefresh,
+                        title = track.title,
+                        artist = track.artist,
+                        album = track.album,
+                        durationSeconds = durationSeconds
+                            ?: track.durationMs?.takeIf { it > 0 }?.let { (it / 1000).toInt() },
+                        forceRefresh = forceRefresh,
                         wordByWord = settingsPreferences.settings.first().wordByWordLyrics,
+                        videoId = track.videoId,
                         onPartialResult = { partial ->
                             withContext(Dispatchers.Main.immediate) {
                                 coroutineContext.ensureActive()
@@ -419,10 +426,18 @@ class PlayerViewModel @Inject constructor(
     private fun publishLyrics(result: LyricsResult) {
         when (result) {
             is LyricsResult.Success -> {
+                // Single funnel for everything the views draw: de-overlap the
+                // timeline once so word fill, line focus and auto-scroll all
+                // read the same edge-to-edge clock. Word-sync rows render
+                // word-by-word; rows without syllables fall back to
+                // line-by-line focus on the same clock.
+                val lines = if (result.isSynced && result.lines.isNotEmpty() && !result.isInstrumental) {
+                    com.lastwave.app.data.lyrics.LyricsRepository.normalizeLyricTiming(result.lines)
+                } else result.lines
                 _lyricsState.value = LyricsUiState.Success(
-                    lines = result.lines,
+                    lines = lines,
                     isSynced = result.isSynced,
-                    isWordSynced = result.isWordSynced,
+                    isWordSynced = result.isWordSynced || lines.any { it.hasSyllables },
                     plainLyrics = result.plainLyrics,
                     isInstrumental = result.isInstrumental,
                     source = result.source,
@@ -811,11 +826,7 @@ private fun MiniPlayer(
     val shownY by animateFloatAsState(dragY, ExpressiveMotion.spatialSpring(), label = "miniPlayerY")
     val threshold = with(LocalDensity.current) { 72.dp.toPx() }
     val isTablet = isTabletOrWideScreen()
-    val shape = if (edgeToEdge && !isTablet) {
-        RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp)
-    } else {
-        RoundedCornerShape(32.dp)
-    }
+    val shape = if (edgeToEdge && !isTablet) RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp) else RoundedCornerShape(100)
     val positionedModifier = if (edgeToEdge && !isTablet) {
         modifier.fillMaxWidth()
     } else {
@@ -859,8 +870,8 @@ private fun MiniPlayer(
     ) {
         Surface(
             shape = shape,
-            // Transparent card when glass (glass draws scrim), 85% surface otherwise.
-            color = if (isGlass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.85f),
+            // Transparent card when glass (glass draws scrim), 95% primaryContainer otherwise to match theme color.
+            color = if (isGlass) Color.Transparent else MaterialTheme.colorScheme.primaryContainer,
             tonalElevation = if (edgeToEdge || isGlass) 0.dp else 6.dp,
             shadowElevation = if (edgeToEdge || isGlass) 0.dp else 12.dp,
             modifier = Modifier.fillMaxWidth().then(
@@ -896,11 +907,11 @@ private fun MiniPlayer(
                     // in light, white text in dark); opaque card keeps theme tokens.
                     val miniTitleColor = if (isGlass) {
                         if (LocalIsDarkTheme.current) Color.White else Color.Black
-                    } else MaterialTheme.colorScheme.onSurface
+                    } else MaterialTheme.colorScheme.onPrimaryContainer
                     val miniArtistColor = if (isGlass) {
                         if (LocalIsDarkTheme.current) Color.White.copy(alpha = 0.7f)
                         else Color.Black.copy(alpha = 0.7f)
-                    } else MaterialTheme.colorScheme.onSurfaceVariant
+                    } else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                     Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
                         Text(
                             track.title,
@@ -1658,77 +1669,66 @@ private fun FullPlayer(
             val bgMaxDimension = maxOf(bgWidth, bgHeight, 1f)
 
             Box(Modifier.matchParentSize().liquidGlassSource(if (fullGlass) playerBackdrop else null)) {
-            // Full-bleed scaled artwork + dark scrims form the glass source.
-            // No nested BackdropBlur: the old 36dp inner capture caused the self-capture SIGSEGV.
-            PlayerArtwork(
+            FluidArtworkBackground(
                 track = track,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.35f
-                        scaleY = 1.35f
-                        alpha = 0.9f
-                    },
-                corner = 0.dp,
-                decodeSizePx = 200,
+                modifier = Modifier.fillMaxSize(),
+                extraBlur = false,
+                fallback = {
+                    PlayerArtwork(
+                        track = track,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = 1.35f
+                                scaleY = 1.35f
+                                alpha = 0.9f
+                            },
+                        corner = 0.dp,
+                        decodeSizePx = 200,
+                    )
+                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.52f)))
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    0f to ambientColor.copy(alpha = 0.58f),
+                                    0.45f to ambientColor.copy(alpha = 0.22f),
+                                    1f to Color.Transparent,
+                                    center = androidx.compose.ui.geometry.Offset(bgWidth * 0.25f, bgHeight * 0.20f),
+                                    radius = bgMaxDimension * 0.85f,
+                                )
+                            )
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    0f to ambientCompanion.copy(alpha = 0.52f),
+                                    0.50f to ambientCompanion.copy(alpha = 0.20f),
+                                    1f to Color.Transparent,
+                                    center = androidx.compose.ui.geometry.Offset(bgWidth * 0.88f, bgHeight * 0.65f),
+                                    radius = bgMaxDimension * 0.78f,
+                                )
+                            )
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    0f to ambientDeep.copy(alpha = 0.42f),
+                                    0.55f to ambientDeep.copy(alpha = 0.14f),
+                                    1f to Color.Transparent,
+                                    center = androidx.compose.ui.geometry.Offset(bgWidth * 0.15f, bgHeight * 0.82f),
+                                    radius = bgMaxDimension * 0.70f,
+                                )
+                            )
+                    )
+                }
             )
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.52f)),
-            )
-
-            // Apple Music: Vibrant chromatic ambient mesh blobs
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.radialGradient(
-                            0f to ambientColor.copy(alpha = 0.58f),
-                            0.45f to ambientColor.copy(alpha = 0.22f),
-                            1f to Color.Transparent,
-                            center = androidx.compose.ui.geometry.Offset(
-                                bgWidth * 0.25f,
-                                bgHeight * 0.20f,
-                            ),
-                            radius = bgMaxDimension * 0.85f,
-                        ),
-                    ),
-            )
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.radialGradient(
-                            0f to ambientCompanion.copy(alpha = 0.52f),
-                            0.50f to ambientCompanion.copy(alpha = 0.20f),
-                            1f to Color.Transparent,
-                            center = androidx.compose.ui.geometry.Offset(
-                                bgWidth * 0.88f,
-                                bgHeight * 0.65f,
-                            ),
-                            radius = bgMaxDimension * 0.78f,
-                        ),
-                    ),
-            )
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.radialGradient(
-                            0f to ambientDeep.copy(alpha = 0.42f),
-                            0.55f to ambientDeep.copy(alpha = 0.14f),
-                            1f to Color.Transparent,
-                            center = androidx.compose.ui.geometry.Offset(
-                                bgWidth * 0.15f,
-                                bgHeight * 0.82f,
-                            ),
-                            radius = bgMaxDimension * 0.70f,
-                        ),
-                    ),
-            )
-
-            // Apple Music: Contrast scrim gradient (ensures text & controls are clear while preserving vibrant colors)
+            // Contrast scrim gradient (ensures text & controls are clear while preserving vibrant colors)
             Box(
                 Modifier
                     .fillMaxSize()
@@ -1738,8 +1738,8 @@ private fun FullPlayer(
                             0.28f to Color.Black.copy(alpha = 0.15f),
                             0.65f to Color.Black.copy(alpha = 0.40f),
                             1.00f to Color.Black.copy(alpha = 0.72f),
-                        ),
-                    ),
+                        )
+                    )
             )
             // Subtle edge vignette
             Box(
@@ -2340,10 +2340,8 @@ private fun FullPlayer(
                                         trackKey = track.videoId ?: "${track.artist}|${track.title}",
                                         wavyEnabled = wavySeekbarEnabled,
                                         onSeek = player::seekTo,
-                                        // Background is always a dark scrim: use the white
-                                        // overlay palette so time labels + waves stay
-                                        // readable in light mode too.
                                         isTranslucent = true,
+                                        fallbackDurationMs = track.durationMs ?: state.durationMs,
                                     )
                                     Spacer(Modifier.height(14.dp))
                                     MainControls(state, player, isTranslucent = true)
@@ -2489,13 +2487,15 @@ private fun SeekBar(
     wavyEnabled: Boolean = true,
     onSeek: (Long) -> Unit,
     isTranslucent: Boolean = false,
+    fallbackDurationMs: Long = 0L,
 ) {
     val progress by progressState.collectAsStateWithLifecycle()
+    val effectiveDurationMs = if (progress.durationMs > 0L) progress.durationMs else fallbackDurationMs.coerceAtLeast(0L)
 
     if (wavyEnabled) {
         WavySeekBar(
             positionMs = progress.positionMs,
-            durationMs = progress.durationMs,
+            durationMs = effectiveDurationMs,
             isPlaying = isPlaying,
             onSeek = onSeek,
             isTranslucent = isTranslucent,
@@ -2516,7 +2516,7 @@ private fun SeekBar(
         if (!frameworkDragging) dragFraction = null
     }
 
-    val boundedDurationMs = progress.durationMs.coerceAtLeast(0L)
+    val boundedDurationMs = effectiveDurationMs.coerceAtLeast(0L)
     val currentFraction = if (boundedDurationMs > 0L) {
         (progress.positionMs.toDouble() / boundedDurationMs.toDouble()).toFloat().coerceIn(0f, 1f)
     } else {
@@ -2707,25 +2707,44 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
                 Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(if (isTranslucent) 28.dp else 31.dp))
             }
         }
+        val pillShape = RoundedCornerShape(100)
+        // Single source of truth for "glass is actually refracting": the
+        // container helper returns Transparent only when setting + device
+        // capability + backdrop all hold. The old contentColor checked only
+        // the *setting*, so setting-ON with an inactive effect (incapable
+        // device, missing backdrop) rendered a white icon on the solid-white
+        // fallback below — the "whole white" play button. Gating content on
+        // the same active flag closes that mismatch for every path.
+        val isPillGlassActive = LocalLiquidGlass.current &&
+            isLiquidGlassBackdropSupported() &&
+            LocalLiquidGlassBackdrop.current != null
         LiquidGlassSurface(
-            glassModifier = Modifier.liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playInteraction),
+            glassModifier = Modifier.liquidGlassChrome(pillShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playInteraction),
             onClick = player::togglePlayPause,
             interactionSource = playInteraction,
-            shape = CircleShape,
-            color = liquidGlassContainerColor(if (isTranslucent) Color.White else MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)),
-            contentColor = if (LocalLiquidGlass.current) {
+            shape = pillShape,
+            // Fallback matches the sibling prev/next buttons (14% white veil,
+            // never solid white): on the full player's dark scrim the white
+            // icon stays readable with or without refraction.
+            color = liquidGlassContainerColor(if (isTranslucent) Color.White.copy(alpha = 0.14f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)),
+            contentColor = if (isPillGlassActive) {
                 if (isTranslucent) Color.White else MaterialTheme.colorScheme.primary
-            } else if (isTranslucent) Color.Black else MaterialTheme.colorScheme.onPrimary,
+            } else if (isTranslucent) Color.White.copy(alpha = 0.94f) else MaterialTheme.colorScheme.onPrimary,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp,
             modifier = Modifier
-                .size(if (isTranslucent) 72.dp else 76.dp)
+                .width(if (isTranslucent) 180.dp else 188.dp)
+                .height(if (isTranslucent) 56.dp else 60.dp)
                 .graphicsLayer {
                     scaleX = playScale
                     scaleY = playScale
                 },
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
                 if (state.isBuffering) {
                     ExpressiveInlineLoadingIndicator(
                         size = if (isTranslucent) 28.dp else 30.dp,
@@ -2733,7 +2752,14 @@ private fun MainControls(state: MusicPlayerState, player: MusicPlayer, isTranslu
                         strokeWidth = 3.dp,
                     )
                 } else {
-                    AnimatedPlayPauseIcon(state.isPlaying, Modifier.size(if (isTranslucent) 36.dp else 39.dp))
+                    AnimatedPlayPauseIcon(state.isPlaying, Modifier.size(if (isTranslucent) 28.dp else 30.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (state.isPlaying) "Pause" else "Play",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = androidx.compose.material3.LocalContentColor.current
+                    )
                 }
             }
         }
@@ -2854,8 +2880,21 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
             iconSize = if (isTranslucent) 19.dp else 20.dp,
             modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp),
         )
-        val pillLabel = remember(state.audioCodec, state.bitrateKbps, state.samplingRateKHz, state.bitDepth, state.isLossless) {
-            qualityBadgeLabel(state)
+        val pillLabel = remember(
+            state.audioCodec,
+            state.bitrateKbps,
+            state.samplingRateKHz,
+            state.bitDepth,
+            state.isLossless,
+            signalPath.clockFallbackResampled,
+            signalPath.appRateHz,
+        ) {
+            val base = qualityBadgeLabel(state)
+            if (signalPath.clockFallbackResampled && signalPath.appRateHz > 0) {
+                "$base → ${formatSampleRateKHz(signalPath.appRateHz.toDouble())}k"
+            } else {
+                base
+            }
         }
         val isSpatialPill = remember(state.audioCodec) { isSpatialAudioCodec(state.audioCodec) }
         // Atmos gets its own spatial logo — HQ badge is only for lossless, never for spatial.
@@ -2889,6 +2928,8 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
                     pillIconDesc,
                     tint = if (isSpatialPill) {
                         if (isTranslucent) Color.White.copy(alpha = 0.95f) else MaterialTheme.colorScheme.onPrimaryContainer
+                    } else if (signalPath.clockFallbackResampled) {
+                        Color(0xFFFFB74D)
                     } else if (isTranslucent) {
                         Color.White.copy(alpha = 0.92f)
                     } else {
@@ -2913,6 +2954,7 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
                     textAlign = TextAlign.Center,
                     color = when {
                         signalPath.bitPerfect -> Color(0xFFE6C15A)
+                        signalPath.clockFallbackResampled -> Color(0xFFFFB74D)
                         isTranslucent -> Color.White.copy(alpha = 0.95f)
                         else -> Color.Unspecified
                     },
@@ -3167,7 +3209,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                     shape = RoundedCornerShape(20.dp),
                     color = liquidGlassContainerColor(
                         if (isCurrent) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.86f),
+                        else MaterialTheme.colorScheme.surfaceContainerHighest,
                     ),
                     contentColor = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer
                     else MaterialTheme.colorScheme.onSurface,

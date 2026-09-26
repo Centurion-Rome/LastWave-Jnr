@@ -22,7 +22,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -245,25 +245,44 @@ fun PlaylistDetailScreen(
     val dragScope = rememberCoroutineScope()
     var draggingIndex by remember(playlistId) { mutableIntStateOf(-1) }
     var dragOffsetY by remember(playlistId) { mutableFloatStateOf(0f) }
+    // Single throttled edge auto-scroll job. The old code launched a fresh
+    // `dragScope.launch { scrollBy() }` on EVERY drag callback inside the edge
+    // zone — dozens of concurrent scrollBy() mutators racing layoutInfo reads
+    // and moveTrack() recompositions, which kills the app at the viewport edge.
+    var edgeScrollJob by remember(playlistId) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun cancelEdgeScroll() {
+        edgeScrollJob?.cancel()
+        edgeScrollJob = null
+    }
     // Permanent reorder only makes sense on the stored order: Custom (ascending)
     // on a local playlist with the lock opened.
     val reorderEnabled = !isReorderLocked &&
         !playlist.isYouTubeOnly &&
         currentSort == PlaylistTrackSort.CUSTOM &&
         sortAscending
-    // Stable keys so animateItem() animates moves instead of treating every
-    // shifted row as new. Duplicates get occurrence suffixes.
-    val trackKeys = remember(playlist.tracks) {
+    // Stable content keys aligned to the DISPLAYED order (not playlist.tracks
+    // order) so animateItem() never sees duplicate or shifting keys at the
+    // scroll edge. The old code built keys from playlist.tracks but consumed
+    // them by displayTracks index — reversed/sorted lists then reused the
+    // wrong key per row, which crashes Lazy layout ("key was already used" /
+    // anchor out of bounds) on fast edge flings. Duplicates get occurrence
+    // suffixes; album disambiguates same name+artist across releases.
+    val displayKeys = remember(displayTracks) {
         val counts = mutableMapOf<String, Int>()
-        playlist.tracks.map { track ->
-            val base = if (track.url.isNotBlank()) track.url else "${track.name}|${track.artist}".lowercase()
+        displayTracks.map { track ->
+            val base = if (track.url.isNotBlank()) {
+                "url:${track.url}"
+            } else {
+                "t:${track.name.lowercase()}|${track.artist.lowercase()}|${track.album?.lowercase().orEmpty()}"
+            }
             val n = counts.getOrDefault(base, 0)
             counts[base] = n + 1
             "$base#$n"
         }
     }
-    LaunchedEffect(playlist.tracks.size) {
-        if (draggingIndex >= displayTracks.size) {
+    LaunchedEffect(playlist.tracks.size, displayTracks.size) {
+        if (draggingIndex < 0 || draggingIndex >= displayTracks.size) {
+            cancelEdgeScroll()
             draggingIndex = -1
             dragOffsetY = 0f
         }
@@ -405,9 +424,11 @@ fun PlaylistDetailScreen(
                         FilledTonalIconButton(
                             onClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                if (playlist.tracks.isNotEmpty()) {
-                                    val playableTracks = playlist.tracks.map(GeneratedTrack::toPlayableTrack)
-                                    val randomIndex = (playableTracks.indices).random()
+                                if (isThisPlaylistPlaying) {
+                                    musicPlayer.toggleShuffle()
+                                } else if (displayTracks.isNotEmpty()) {
+                                    val playableTracks = displayTracks.map(GeneratedTrack::toPlayableTrack)
+                                    val randomIndex = playableTracks.indices.random()
                                     musicPlayer.playQueue(
                                         playableTracks,
                                         startIndex = randomIndex,
@@ -418,7 +439,16 @@ fun PlaylistDetailScreen(
                             },
                             shape = CircleShape,
                             colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                containerColor = if (isThisPlaylistPlaying && playbackState.shuffleEnabled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                },
+                                contentColor = if (isThisPlaylistPlaying && playbackState.shuffleEnabled) {
+                                    MaterialTheme.colorScheme.onPrimary
+                                } else {
+                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                },
                             ),
                             modifier = Modifier.size(50.dp),
                         ) {
@@ -661,8 +691,11 @@ fun PlaylistDetailScreen(
                 itemsIndexed(
                     items = displayTracks,
                     key = { index, _ ->
-                        if (reorderEnabled) trackKeys.getOrNull(index) ?: "track_$index"
-                        else "track_${displayTracks.getOrNull(index)?.key ?: index}"
+                        // Never fall back to a bare "track_$index": two rows
+                        // would share one key after insert/delete and Lazy
+                        // throws at the viewport edge. displayKeys is always
+                        // exactly displayTracks.size long (same remember input).
+                        displayKeys.getOrElse(index) { "pos_fallback_$index" }
                     },
                     contentType = { _, _ -> "playlist_track" },
                 ) { index, track ->
@@ -670,7 +703,7 @@ fun PlaylistDetailScreen(
                         playbackState.current?.title.equals(track.name, ignoreCase = true) &&
                         playbackState.current?.artist.equals(track.artist, ignoreCase = true)
                     val isDragging = reorderEnabled && index == draggingIndex
-                    val stableKey = if (reorderEnabled) trackKeys.getOrNull(index) ?: "track_$index" else "track_$index"
+                    val stableKey = displayKeys.getOrElse(index) { "pos_fallback_$index" }
 
                     Box(
                         modifier = Modifier
@@ -691,11 +724,19 @@ fun PlaylistDetailScreen(
                             isPlaying = isPlayingThisSong,
                             onClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                musicPlayer.playQueue(
-                                    displayTracks.map(GeneratedTrack::toPlayableTrack),
-                                    startIndex = index,
-                                    sourceLabel = playlist.title,
-                                )
+                                if (displayTracks.isEmpty()) return@NativeTrackRow
+                                // index is from composition time; the list can
+                                // shrink (remove/move) before the tap lands —
+                                // an OOB startIndex crashed playback at the edge.
+                                val safeIndex = index.coerceIn(displayTracks.indices)
+                                runCatching {
+                                    musicPlayer.playQueue(
+                                        displayTracks.map(GeneratedTrack::toPlayableTrack),
+                                        startIndex = safeIndex,
+                                        sourceLabel = playlist.title,
+                                        startShuffled = playbackState.shuffleEnabled,
+                                    )
+                                }
                             },
                             onMenu = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -719,26 +760,38 @@ fun PlaylistDetailScreen(
                                             )
                                             .padding(8.dp)
                                             .pointerInput(stableKey) {
-                                                detectDragGesturesAfterLongPress(
+                                                detectDragGestures(
                                                     onDragStart = {
                                                         draggingIndex = index
                                                         dragOffsetY = 0f
                                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                                     },
                                                     onDragEnd = {
+                                                        cancelEdgeScroll()
                                                         draggingIndex = -1
                                                         dragOffsetY = 0f
                                                     },
                                                     onDragCancel = {
+                                                        cancelEdgeScroll()
                                                         draggingIndex = -1
                                                         dragOffsetY = 0f
                                                     },
                                                     onDrag = { change, dragAmount ->
                                                         change.consume()
                                                         val source = draggingIndex
-                                                        if (source < 0) return@detectDragGesturesAfterLongPress
+                                                        if (source < 0 || source !in displayTracks.indices) {
+                                                            cancelEdgeScroll()
+                                                            return@detectDragGestures
+                                                        }
                                                         dragOffsetY += dragAmount.y
-                                                        val layoutInfo = listState.layoutInfo
+                                                        // layoutInfo can throw while the list is
+                                                        // recomposing under moveTrack(); never let a
+                                                        // scroll-edge read crash the app.
+                                                        val layoutInfo = runCatching { listState.layoutInfo }.getOrNull()
+                                                            ?: return@detectDragGestures
+                                                        val visible = runCatching { layoutInfo.visibleItemsInfo }.getOrNull()
+                                                            ?: return@detectDragGestures
+                                                        if (visible.isEmpty()) return@detectDragGestures
                                                         // Key-based lookup (no header-offset assumptions: hero,
                                                         // VU meter and the sort-hint items shift lazy indices).
                                                         // latestTrackKeys: pointerInput(stableKey) outlives
@@ -748,35 +801,46 @@ fun PlaylistDetailScreen(
                                                         val keys = latestTrackKeys
                                                         val count = latestDisplayCount
                                                         val sourceKey = keys.getOrNull(source)
-                                                            ?: return@detectDragGesturesAfterLongPress
-                                                        val draggedInfo = layoutInfo.visibleItemsInfo
+                                                            ?: return@detectDragGestures
+                                                        val draggedInfo = visible
                                                             .firstOrNull { it.key == sourceKey }
-                                                            ?: return@detectDragGesturesAfterLongPress
+                                                            ?: return@detectDragGestures
                                                         val draggedCenter = draggedInfo.offset + draggedInfo.size / 2 + dragOffsetY.toInt()
-                                                        val target = layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                                        val target = visible.firstOrNull { info ->
                                                             info.key != sourceKey &&
                                                                 draggedCenter in info.offset..(info.offset + info.size)
                                                         }?.key?.let(keys::indexOf)?.takeIf { it >= 0 }
                                                         if (target != null && target != source && target in 0 until count) {
-                                                            viewModel.moveTrack(playlistId, source, target)
-                                                            val targetInfo = keys.getOrNull(target)?.let { key ->
-                                                                layoutInfo.visibleItemsInfo
-                                                                    .firstOrNull { it.key == key }
-                                                            }
+                                                            runCatching { viewModel.moveTrack(playlistId, source, target) }
+                                                            val targetKey = keys.getOrNull(target)
+                                                            val targetInfo = runCatching {
+                                                                listState.layoutInfo.visibleItemsInfo
+                                                                    .firstOrNull { it.key == targetKey }
+                                                            }.getOrNull()
                                                             if (targetInfo != null) {
                                                                 dragOffsetY += (draggedInfo.offset - targetInfo.offset).toFloat()
                                                             }
                                                             draggingIndex = target
-                                                            haptic.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+                                                            runCatching { haptic.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick) }
                                                         }
-                                                        val viewportStart = layoutInfo.viewportStartOffset
-                                                        val viewportEnd = layoutInfo.viewportEndOffset
+                                                        val viewportStart = runCatching { layoutInfo.viewportStartOffset }.getOrDefault(0)
+                                                        val viewportEnd = runCatching { layoutInfo.viewportEndOffset }.getOrDefault(0)
+                                                        if (viewportEnd <= viewportStart) {
+                                                            cancelEdgeScroll()
+                                                            return@detectDragGestures
+                                                        }
                                                         val edgeZone = 180
-                                                        when {
-                                                            draggedCenter < viewportStart + edgeZone ->
-                                                                dragScope.launch { listState.scrollBy(-28f) }
-                                                            draggedCenter > viewportEnd - edgeZone ->
-                                                                dragScope.launch { listState.scrollBy(28f) }
+                                                        val direction = when {
+                                                            draggedCenter < viewportStart + edgeZone -> -1f
+                                                            draggedCenter > viewportEnd - edgeZone -> 1f
+                                                            else -> 0f
+                                                        }
+                                                        if (direction == 0f) {
+                                                            cancelEdgeScroll()
+                                                        } else if (edgeScrollJob?.isActive != true) {
+                                                            edgeScrollJob = dragScope.launch {
+                                                                runCatching { listState.scrollBy(direction * 28f) }
+                                                            }
                                                         }
                                                     },
                                                 )
