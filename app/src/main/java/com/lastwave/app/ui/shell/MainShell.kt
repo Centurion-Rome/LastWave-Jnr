@@ -263,6 +263,7 @@ fun MainShell(
         HorizontalPager(
             state = pagerState,
             beyondViewportPageCount = 0,
+            userScrollEnabled = false,
             modifier = Modifier.fillMaxSize().liquidGlassSource(if (navGlass) navigationBackdrop else null),
         ) { page ->
             val isCurrent = page == pagerState.currentPage

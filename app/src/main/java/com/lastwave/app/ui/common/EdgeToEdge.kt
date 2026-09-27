@@ -81,7 +81,6 @@ fun EdgeToEdgeDialogWindow() {
                 rootCtx = rootCtx.baseContext
             }
         }
-
         val actDecor = activity?.window?.decorView
         if (dialogWindow == null && view.rootView != actDecor) {
             isDialog = true
