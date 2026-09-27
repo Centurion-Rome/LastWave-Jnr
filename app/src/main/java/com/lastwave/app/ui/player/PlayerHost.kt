@@ -2614,10 +2614,10 @@ private fun FullPlayer(
                                         tertiaryColor = ambientDeep,
                                     )
                                     Spacer(Modifier.height(14.dp))
-                                    MainControls(state, player, isTranslucent = isGlass)
+                                    MainControls(state, player, isTranslucent = LocalLiquidGlass.current)
                                     }
                                     Spacer(Modifier.height(24.dp))
-                                    PlayerUtilityControls(state, player, isTranslucent = isGlass)
+                                    PlayerUtilityControls(state, player, isTranslucent = LocalLiquidGlass.current)
                                 }
                         }
                     }
