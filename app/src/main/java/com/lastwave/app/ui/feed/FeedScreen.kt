@@ -312,8 +312,10 @@ fun FeedScreen(
                     }.toMutableList()
 
                     if (quickTiles.none { it.title.equals("Discover Mix", ignoreCase = true) || it.collection == "discover_mix" }) {
+                        val newReleasesIndex = quickTiles.indexOfFirst { it.collection == "new_releases" }
+                        val insertIndex = if (newReleasesIndex != -1) newReleasesIndex else quickTiles.size
                         quickTiles.add(
-                            0,
+                            insertIndex,
                             com.lastwave.app.data.feed.FeedQuickTile(
                                 title = "Discover Mix",
                                 subtitle = "Updated today",
@@ -329,13 +331,14 @@ fun FeedScreen(
                                 color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                            FeedSectionHeader(title = "Quick access")
+                                    FeedSectionHeader(title = "Quick access")
                                     Spacer(modifier = Modifier.height(12.dp))
                             QuickTilesGrid(
                                 tiles = quickTiles,
                                 onTileClick = { tile ->
                                     when {
-                                        tile.collection == "radio" -> onOpenDiscover()
+                                        tile.collection == "discover_mix" -> onOpenDiscover()
+                                        tile.collection == "radio" -> viewModel.playInfiniteRadio()
                                         tile.collection == "yt_liked" || tile.playlistId == "yt_liked" -> onOpenFeedPlaylist("yt_liked")
                                         tile.collection == "yt_recent" || tile.playlistId == "yt_recent" -> onOpenFeedPlaylist("yt_recent")
                                         tile.collection == "new_releases" -> onOpenNewReleases()
