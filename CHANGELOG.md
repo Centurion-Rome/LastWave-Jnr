@@ -2,34 +2,79 @@
 
 ## [4.2.3] - 2026-09-28
 
+A large sync with upstream `Clash-Projects/LastWave-Native` (36 commits, `21edf34`),
+plus the Jnr fork's own features. Upstream force-pushed a full history rewrite, so
+this release merged against a reconstructed fork point (`82c8e8b`, grafted) rather
+than a normal fast-forward. See the merge commit `e383162` for the full breakdown.
+
 ### Added
-- **Upstream sync to 21edf34:** the 36 upstream commits from `Clash-Projects/LastWave-Native` covering 2026-09-26..2026-09-28. Upstream force-pushed a full history rewrite, so this release merges against a grafted fork point (`82c8e8b`); see the merge commit message for the full breakdown.
-- **Parallel stream racing:** YouTube and lossless streams are resolved in parallel so playback starts with zero delay, with a background hot-swap when lossless lands (upstream 21edf34).
-- **Fuzzy settings search:** every setting is indexed and searchable from the settings screen (upstream 5e7c243).
-- **Animated album canvas:** Apple Music, Tidal and community canvas motion artwork, plus a full-bleed 9:16 edge-to-edge pass (upstream 31230ec, b70c9fe).
-- **Obsidian glass widget:** a single adaptive now-playing widget rebuilt on classic `RemoteViews`, replacing the Glance widget and the Large Now Playing widget (upstream 58bb697, 6cd4050, 702324f).
-- **System audio effects mode** (Experimental, default OFF) and a settings reorganisation (upstream 815bead).
-- **Resizable lyrics** and a lyrics sync-offset dialog (upstream 4265a83, 5687220).
-- **Quick Tiles:** Discover Mix is now placed at the end of the grid before New Releases and is clickable; the Radio tile plays infinite radio instead of opening Discover (upstream branch 4baf6c7, d0db614).
-- **Liquid-glass dialog blur:** blur radius and scrim dim now follow the liquid glass setting — a wider, softer blur (150 / 0.18) with glass on, the tighter 120 / 0.28 with it off.
+- **Instant playback:** YouTube and lossless streams resolve in parallel, so playback
+  begins with no waiting; if lossless resolves later it hot-swaps in the background
+  without losing the start time (upstream 21edf34).
+- **Settings search:** every setting is indexed and fuzzy-searchable from the settings
+  screen (upstream 5e7c243).
+- **Animated album canvas:** motion artwork for Apple Music, Tidal and community
+  canvases, now full-bleed 9:16 edge-to-edge with a hero fade (upstream 31230ec, b70c9fe).
+- **Obsidian glass widget:** a single adaptive now-playing widget rebuilt on classic
+  `RemoteViews` (upstream 58bb697, 6cd4050, 702324f).
+- **System audio effects mode** (Experimental, default OFF) publishes the audio session
+  to external equalizer apps and OEM Dolby, and a settings reorganisation
+  (upstream 815bead).
+- **Resizable lyrics** and a dedicated lyrics sync-offset dialog (upstream 4265a83, 5687220).
+- **Quick Tiles:** Discover Mix sits at the end of the grid before New Releases and is
+  clickable; the Radio tile now plays infinite radio instead of opening Discover
+  (upstream branch d0db614, 4baf6c7).
+- **Liquid-glass dialog blur:** blur radius and scrim dim follow the liquid glass setting
+  — a wider, softer blur (150 / 0.18) with glass on, the tighter 120 / 0.28 with it off.
 
 ### Changed
-- **Analog VU meter** retained across the full player, queue, discover, search, playlist, album and artist screens, with the PCM tap still wired through `NativePcmAudioProcessor`.
-- **Playlist reorder lock** is still persisted per playlist, reconciled with upstream's new session-scoped lock toggle and playlist search.
+- **Analog VU meter** retained across the player, queue, discover, search, playlist,
+  album and artist screens, with the real-bass PCM tap still wired through
+  `NativePcmAudioProcessor`.
+- **Offline playback recovery:** orphaned downloads are found via MediaStore after a
+  reinstall, with a `READ_MEDIA_AUDIO` runtime request on Android 13+.
+- **Downloads tab** opens automatically when the device starts without connectivity.
+- **Playlist reorder lock** is persisted per playlist, reconciled with upstream's new
+  session-scoped lock toggle and playlist search.
 - **Profile avatar** in the feed header gained a 2dp primary border ring.
 - **Downloads header action** label is now "Downloads & Offline Music".
 
 ### Removed
-- **Glance widget internals:** `InMemoryWidgetState` and the WorkManager proguard keeps went with the Glance widget upstream deleted.
-- **External scrobbler:** `MediaScrobbleListenerService` and the ScrobblerApps/ScrobblerDebugLog screens were removed upstream. Last.fm still backs the taste profile and discovery.
+- **External scrobbler:** `MediaScrobbleListenerService` and the ScrobblerApps /
+  ScrobblerDebugLog screens were removed upstream. Last.fm still backs the taste
+  profile, mixes and discovery — only third-party scrobble forwarding is gone.
+- **Large Now Playing widget** and the Jetpack Glance widget internals
+  (`InMemoryWidgetState` and its WorkManager proguard keeps), both superseded by the
+  new widget implementation.
 
 ### Fixed
-- **Playlist drag reorder** keeps the fork's key-based lookup against upstream's `displayKeys` rename, alongside upstream's `runCatching` guards at the viewport edge.
-- **"Downloads" row** is the offline auto-navigation target when the device starts without connectivity.
+- **Transient playback errors** hold the track instead of auto-skipping on 403/throttle,
+  and tail-pinned tracks advance (upstream cfd542c, 45e4098).
+- **YouTube login** no longer reports a false "session rejected" on slow devices
+  (upstream bf74b74).
+- **Lossless honesty:** prefers 24-bit masters over parking at 16-bit, with
+  sample-rate-driven bit-depth inference across resolve, quality pill, signal path and
+  track details. Atmos falls back to Hi-Res → Lossless → 320k, and stereo tiers never
+  upscale to Dolby (upstream 8719d1a, 0945d1b, 4333d77).
+- **Lyrics pipeline:** backing-vocal rows, phrase grouping, faster scroll chase and
+  corrected sync-offset guidance (upstream d9e02cd, da3d33d, e848f25).
+- **Playlist duplication races,** auto-suffixing of same-title tracks and monotonic IDs
+  (upstream 815bead).
+- **Notification stability** during playback (upstream fc25a41).
+- **Playlist drag reorder** keeps the fork's key-based lookup against upstream's
+  `displayKeys` rename, alongside upstream's `runCatching` guards at the viewport edge.
+- **DASH segment substitution did not compile** on upstream: `Regex("""\$Number…""")`
+  in a raw string reads `$Number` as a template on `kotlin.Number`. Fixed locally with
+  `${'$'}`; not yet reported upstream.
 
 ### Notes
-- A stray 0-byte file committed upstream at `app/src/main/java/com/lastwave/app/data/addon/sedXzeBMg` was deleted.
-- The README screenshots still show the Jnr branding and VU meter; they have not been re-captured since the widget revamp and should be refreshed before a public release.
+- **The home-screen widget was rebuilt from scratch**, moving off Jetpack Glance onto
+  classic `RemoteViews`, changing size, and removing the large Now Playing widget.
+  Users should **remove and re-add the widget** after updating.
+- A stray 0-byte file committed upstream at
+  `app/src/main/java/com/lastwave/app/data/addon/sedXzeBMg` was deleted.
+- The README screenshots still show the Jnr branding and VU meter; they have not been
+  re-captured since the widget revamp and should be refreshed.
 
 ## [4.2.2] - 2026-09-27
 
