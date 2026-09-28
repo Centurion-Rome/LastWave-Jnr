@@ -2024,7 +2024,11 @@ class TrackDownloadManager @Inject constructor(
             val endNumber = startNumber + segmentCount - 1
             for (segIndex in startNumber..endNumber) {
                 currentCoroutineContext().ensureActive()
-                val segUrl = mediaTemplate.replace(Regex("""\$Number(?:%0(\d+)d)?\$""")) { m ->
+                // DASH media templates address segments as $Number$, sometimes
+                // zero padded as $Number%05d$. A literal $ must be written
+                // ${'$'} inside a Kotlin raw string, and a regex needs it
+                // backslash-escaped as well, hence \${'$'} on both ends.
+                val segUrl = mediaTemplate.replace(Regex("""\${'$'}Number(?:%0(\d+)d)?\${'$'}""")) { m ->
                     val pad = m.groupValues.getOrNull(1)?.toIntOrNull()
                     if (pad != null) segIndex.toString().padStart(pad, '0') else segIndex.toString()
                 }

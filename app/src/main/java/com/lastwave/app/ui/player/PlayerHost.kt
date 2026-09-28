@@ -1473,7 +1473,6 @@ private fun AddToPlaylistDialog(
                 androidx.compose.material3.IconButton(onClick = { onDismiss() }) {
                     Icon(Icons.Filled.Close, contentDescription = "Close")
                 }
-                }
             }
 
             Surface(
@@ -2695,8 +2694,12 @@ internal fun PlayerProgressSlider(
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
 ) {
+    val liquidGlass = LocalLiquidGlass.current
     val primary = primaryColor
     val tertiary = tertiaryColor
+    // Liquid glass washes out the far end of the active track, so the gradient
+    // resolves to white on glass and back to the theme primary otherwise.
+    val activeTrackEndColor = if (liquidGlass) Color.White else primaryColor
     val inactive = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 0.20f else 0.12f)
     val range = (valueRange.endInclusive - valueRange.start).coerceAtLeast(0.0001f)
     val fraction = ((value - valueRange.start) / range).coerceIn(0f, 1f)
