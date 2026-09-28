@@ -1,5 +1,36 @@
 # Changelog
 
+## [4.2.3] - 2026-09-28
+
+### Added
+- **Upstream sync to 21edf34:** the 36 upstream commits from `Clash-Projects/LastWave-Native` covering 2026-09-26..2026-09-28. Upstream force-pushed a full history rewrite, so this release merges against a grafted fork point (`82c8e8b`); see the merge commit message for the full breakdown.
+- **Parallel stream racing:** YouTube and lossless streams are resolved in parallel so playback starts with zero delay, with a background hot-swap when lossless lands (upstream 21edf34).
+- **Fuzzy settings search:** every setting is indexed and searchable from the settings screen (upstream 5e7c243).
+- **Animated album canvas:** Apple Music, Tidal and community canvas motion artwork, plus a full-bleed 9:16 edge-to-edge pass (upstream 31230ec, b70c9fe).
+- **Obsidian glass widget:** a single adaptive now-playing widget rebuilt on classic `RemoteViews`, replacing the Glance widget and the Large Now Playing widget (upstream 58bb697, 6cd4050, 702324f).
+- **System audio effects mode** (Experimental, default OFF) and a settings reorganisation (upstream 815bead).
+- **Resizable lyrics** and a lyrics sync-offset dialog (upstream 4265a83, 5687220).
+- **Quick Tiles:** Discover Mix is now placed at the end of the grid before New Releases and is clickable; the Radio tile plays infinite radio instead of opening Discover (upstream branch 4baf6c7, d0db614).
+- **Liquid-glass dialog blur:** blur radius and scrim dim now follow the liquid glass setting — a wider, softer blur (150 / 0.18) with glass on, the tighter 120 / 0.28 with it off.
+
+### Changed
+- **Analog VU meter** retained across the full player, queue, discover, search, playlist, album and artist screens, with the PCM tap still wired through `NativePcmAudioProcessor`.
+- **Playlist reorder lock** is still persisted per playlist, reconciled with upstream's new session-scoped lock toggle and playlist search.
+- **Profile avatar** in the feed header gained a 2dp primary border ring.
+- **Downloads header action** label is now "Downloads & Offline Music".
+
+### Removed
+- **Glance widget internals:** `InMemoryWidgetState` and the WorkManager proguard keeps went with the Glance widget upstream deleted.
+- **External scrobbler:** `MediaScrobbleListenerService` and the ScrobblerApps/ScrobblerDebugLog screens were removed upstream. Last.fm still backs the taste profile and discovery.
+
+### Fixed
+- **Playlist drag reorder** keeps the fork's key-based lookup against upstream's `displayKeys` rename, alongside upstream's `runCatching` guards at the viewport edge.
+- **"Downloads" row** is the offline auto-navigation target when the device starts without connectivity.
+
+### Notes
+- A stray 0-byte file committed upstream at `app/src/main/java/com/lastwave/app/data/addon/sedXzeBMg` was deleted.
+- The README screenshots still show the Jnr branding and VU meter; they have not been re-captured since the widget revamp and should be refreshed before a public release.
+
 ## [4.2.2] - 2026-09-27
 
 ### Added
