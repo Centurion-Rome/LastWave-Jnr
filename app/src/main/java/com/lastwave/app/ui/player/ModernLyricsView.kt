@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.SyncDisabled
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -45,6 +46,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -104,9 +109,20 @@ fun ModernLyricsPanel(
     onToggleFullscreen: (() -> Unit)? = null,
     isFullscreen: Boolean = false,
     onRetry: () -> Unit = {},
+    onOpenLyricsOffset: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    /** Manual sync correction (ms, + = lyrics earlier). Applies to lyric
+     *  focus/highlight only — the seekbar below keeps true position. */
+    lyricsOffsetMs: Long = 0L,
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    secondaryColor: Color = MaterialTheme.colorScheme.secondary,
+    tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
 ) {
     val track = state.current ?: return
+    
+    var lyricsFontScale by rememberSaveable {
+    mutableFloatStateOf(1f)
+    }
 
     val progress by (progressState ?: player.progressState).collectAsStateWithLifecycle(
         initialValue = PlaybackProgressState(positionMs = state.positionMs, durationMs = state.durationMs),
@@ -118,8 +134,8 @@ fun ModernLyricsPanel(
 
     LaunchedEffect(progress.positionMs, state.isPlaying, track) {
         val drift = kotlin.math.abs(smoothedPositionMs - progress.positionMs)
-        // Hard snap on seek (>250ms drift) or when stopped/paused
-        if (drift > 250 || !state.isPlaying) {
+        // Hard snap on seek (>120ms drift) or when stopped/paused
+        if (drift > 120 || !state.isPlaying) {
             smoothedPositionMs = progress.positionMs
         }
     }
@@ -136,14 +152,13 @@ fun ModernLyricsPanel(
                 val target = progress.positionMs
                 val dur = progress.durationMs.takeIf { it > 0 } ?: state.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
 
-                var nextPos = smoothedPositionMs + dt
-                val drift = target - nextPos
-                if (kotlin.math.abs(drift) > 250) {
-                    nextPos = target
+                val drift = target - (smoothedPositionMs + dt)
+                if (kotlin.math.abs(drift) > 120) {
+                    smoothedPositionMs = target.coerceIn(0L, dur)
                 } else {
-                    nextPos += (drift * 0.15f).toLong()
+                    val nextPos = smoothedPositionMs + dt + (drift * 0.25f).toLong()
+                    smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
                 }
-                smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
             }
         }
     }
@@ -212,12 +227,13 @@ fun ModernLyricsPanel(
                             if (meaningful.isEmpty()) false
                             else meaningful.count { it.isRtl } > meaningful.size / 2
                         }
-                        // Apple Music word-sync rows run full-sentence wide, so at
-                        // large sizes they sit on the screen edge even at rest.
-                        // They get a compact type size; other providers keep
-                        // their larger sizes. All three tiers are ~150% of the
-                        // previous scale; the wrap budget below is measured in
-                        // these same styles so rows still clear the edges.
+                        // Apple Music word-sync rows run full-sentence wide, so
+                        // they keep a compact size while other providers use
+                        // the standard tier. Sizes are deliberately moderate:
+                        // oversized type was the gap driver (fewer words fit,
+                        // the splitter chopped rows, multiplied spacing).
+                        // The wrap budget below is measured in these same
+                        // styles so rows still clear the edges.
                         val isAppleMusic = remember(targetState.source) {
                             targetState.source?.contains("Apple Music", ignoreCase = true) == true
                         }
@@ -225,12 +241,12 @@ fun ModernLyricsPanel(
                         // with exactly this style, so its fit verdict matches
                         // what the canvas will draw.
                         val karaokeNormalStyle = LocalTextStyle.current.copy(
-                            fontSize = if (isAppleMusic) 33.sp else if (isWordSynced) 42.sp else 36.sp,
+                            fontSize = ((if (isAppleMusic) 28f else if (isWordSynced) 32f else 30f) * lyricsFontScale).sp,
                             fontWeight = FontWeight.Bold,
                             textMotion = TextMotion.Animated,
                         )
                         val karaokeAccompanimentStyle = LocalTextStyle.current.copy(
-                            fontSize = if (isAppleMusic) 26.sp else if (isWordSynced) 30.sp else 27.sp,
+                            fontSize = ((if (isAppleMusic) 22f else if (isWordSynced) 24f else 22f) * lyricsFontScale).sp,
                             fontWeight = FontWeight.Bold,
                             textMotion = TextMotion.Animated,
                         )
@@ -278,8 +294,9 @@ fun ModernLyricsPanel(
                                     trackArtist = track.artist,
                                     normalStyle = karaokeNormalStyle,
                                     accompanimentStyle = karaokeAccompanimentStyle,
-                                    currentPosition = { smoothedPositionMs.toInt() },
+                                    currentPosition = { (smoothedPositionMs + lyricsOffsetMs).toInt() },
                                     player = player,
+                                    lyricsOffsetMs = lyricsOffsetMs,
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxWidth(),
@@ -289,6 +306,7 @@ fun ModernLyricsPanel(
                     } else if (!targetState.plainLyrics.isNullOrBlank()) {
                         ModernPlainLyricsView(
                             plainLyrics = targetState.plainLyrics,
+                            lyricsFontScale = lyricsFontScale,
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
@@ -313,6 +331,13 @@ fun ModernLyricsPanel(
             wavySeekbarEnabled = wavySeekbarEnabled,
             onToggleFullscreen = onToggleFullscreen,
             isFullscreen = isFullscreen,
+            lyricsOffsetMs = lyricsOffsetMs,
+            onOpenLyricsOffset = onOpenLyricsOffset,
+            lyricsFontScale = lyricsFontScale,
+onLyricsFontScaleChange = { lyricsFontScale = it },
+            primaryColor = primaryColor,
+            secondaryColor = secondaryColor,
+            tertiaryColor = tertiaryColor,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
@@ -323,26 +348,21 @@ fun ModernLyricsPanel(
 
 /**
  * Horizontal chrome around karaoke glyphs, both sides combined: 12dp view
- * padding (Modifier.padding on the list below) + the library's own padding
- * on both its outer scrim Box and its inner list (assumed 24dp each, kept
- * from the original conservative estimate) + 16dp line padding inside each
- * karaoke row, plus a safety margin for font-scale and locale variance.
- * The 0.80 zoom headroom in the budget below sits on top of this, so
- * wrapped rows stay clear of the edge in every focus state — including
- * long word-sync rows at the large scale.
+ * padding (Modifier.padding on the list below) + 16dp line padding inside
+ * each karaoke row. Measured, not guessed: the old 128dp estimate plus a
+ * 0.80 panic factor shrank the budget to ~185dp on a 360dp phone, chopping
+ * nearly every line into 2-word rows.
  */
-private val KaraokeHorizontalChrome = 128.dp
+private val KaraokeHorizontalChrome = 56.dp
 
 /**
- * Measures lines against the settled list width and pre-splits overlong
- * ones into balanced sub-lines ([splitKaraokeToFit] for word-sync rows,
- * [splitLineSyncToFit] for line-sync rows) before the karaoke canvas ever
- * measures them. The budget reserves headroom for the canvas's
- * focused-line emphasis (~1.1x zoom on the active row): without it a line
- * that exactly fits while idle overflows past the screen edge the moment
- * it becomes active — large word-sync lines are the usual victims since
- * they routinely span the full width. At the current large type scale the
- * reserve is set to 0.80 so zoomed rows still clear the edges.
+ * Measures lines against the settled list width and pre-splits only
+ * genuinely overlong ones into balanced sub-lines ([splitKaraokeToFit] for
+ * word-sync rows, [splitLineSyncToFit] for line-sync rows) before the
+ * karaoke canvas ever measures them. The budget keeps a small 0.95 reserve
+ * for the canvas's focused-line emphasis (~1.1x zoom on the active row);
+ * normal lines pass through untouched with their authored timing, so focus
+ * and auto-scroll follow lyric lines instead of fabricated chunks.
  */
 @Composable
 private fun KaraokeLineWrapScope(
@@ -355,21 +375,17 @@ private fun KaraokeLineWrapScope(
     currentPosition: () -> Int,
     player: MusicPlayer,
     modifier: Modifier = Modifier,
+    lyricsOffsetMs: Long = 0L,
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
         val textMeasurer = rememberTextMeasurer()
         val wrapBudgetPx = remember(maxWidth, density) {
-            // Conservative on purpose, two compounding reasons:
-            // 1. The splitter measures word-by-word while the canvas draws
-            //    continuous text, so cross-word kerning can add a pixel or
-            //    two beyond the summed word widths.
-            // 2. The canvas enlarges the focused line (~1.1x). A row that
-            //    exactly fits while idle would spill past the screen edge
-            //    once active — 0.80 reserves that zoom room (plus margin for
-            //    the large type scale) so wrapped rows stay clear of the edge
-            //    in every focus state.
-            with(density) { (maxWidth - KaraokeHorizontalChrome).toPx().coerceAtLeast(0f) } * 0.80f
+            // Tight on purpose: the splitter measures word-by-word while the
+            // canvas draws continuous text (kerning can add a pixel or two),
+            // and the focused line zooms ~1.1x — 0.95 covers both without
+            // chopping lines that fit. Only true overflow splits.
+            with(density) { (maxWidth - KaraokeHorizontalChrome).toPx().coerceAtLeast(0f) } * 0.95f
         }
         val displayLines = remember(lines, wrapBudgetPx, normalStyle) {
             // Word-sync rows split on syllable timing, line-sync rows on
@@ -408,7 +424,8 @@ private fun KaraokeLineWrapScope(
             showPhonetic = true,
             currentPosition = currentPosition,
             onLineClicked = { line ->
-                player.seekTo(line.start.toLong())
+                // Inverse of the highlight shift: tap targets audio time.
+                player.seekTo((line.start - lyricsOffsetMs).coerceAtLeast(0).toLong())
             },
             onLinePressed = {},
             modifier = Modifier
@@ -431,7 +448,31 @@ private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine 
     val isLineRtl = isRtl || (isOverallRtl && (text.isBlank() || text == "♪"))
 
     return if (hasSyllables) {
-        val leadSyllables = syllables.filter { !it.isBackground }.ifEmpty { syllables }
+        val leadSyllables = syllables.filter { !it.isBackground }
+        if (leadSyllables.isEmpty()) {
+            // Backing-vocal-only row ("(ooh)" ad-libs): a standalone dim
+            // accompaniment row, never a bright lead row. The library
+            // styles top-level accompaniment rows distinctly.
+            val needsSpacing = text.contains(' ') || text.contains('\u00A0')
+            val contents = renderedSyllableContents(syllables, needsSpacing)
+            val bgKaraoke = syllables.mapIndexed { index, syl ->
+                val sStart = syl.timeMs.toInt()
+                val sEnd = ((syl.timeMs + syl.durationMs).toInt()).coerceAtLeast(sStart + 50)
+                KaraokeSyllable(
+                    content = contents.getOrElse(index) { syl.text },
+                    start = sStart,
+                    end = sEnd,
+                )
+            }
+            return KaraokeLine.AccompanimentKaraokeLine(
+                syllables = bgKaraoke,
+                translation = null,
+                alignment = if (isLineRtl) KaraokeAlignment.Start else KaraokeAlignment.End,
+                start = lineStart,
+                end = lineEnd.coerceAtLeast(lineStart + 100),
+                phonetic = null,
+            )
+        }
         val bgSyllables = if (leadSyllables.size < syllables.size) syllables.filter { it.isBackground } else emptyList()
         val needsSpacing = text.contains(' ') || text.contains('\u00A0')
 
@@ -519,6 +560,7 @@ private fun List<LyricLine>.toSyncedLyrics(title: String, artist: String, isOver
 @Composable
 private fun ModernPlainLyricsView(
     plainLyrics: String,
+    lyricsFontScale: Float = 1f,
     modifier: Modifier = Modifier,
 ) {
     val isRtl = remember(plainLyrics) { isRtlText(plainLyrics) }
@@ -551,8 +593,8 @@ private fun ModernPlainLyricsView(
             Text(
                 text = plainLyrics,
                 style = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = 28.sp,
-                    lineHeight = 46.sp,
+                fontSize = (28f * lyricsFontScale).sp,
+lineHeight = (46f * lyricsFontScale).sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 0.1.sp,
                 ),
@@ -625,6 +667,13 @@ private fun ModernLyricsControls(
     wavySeekbarEnabled: Boolean = true,
     onToggleFullscreen: (() -> Unit)? = null,
     isFullscreen: Boolean = false,
+    lyricsOffsetMs: Long = 0L,
+    onOpenLyricsOffset: (() -> Unit)? = null,
+    lyricsFontScale: Float = 1f,
+    onLyricsFontScaleChange: (Float) -> Unit = {},
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    secondaryColor: Color = MaterialTheme.colorScheme.secondary,
+    tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -633,42 +682,105 @@ private fun ModernLyricsControls(
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (onToggleFullscreen != null) {
+        Row(
+    modifier = Modifier.fillMaxWidth(),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
+) {
+    Text(
+        text = "A",
+        fontSize = 14.sp,
+        color = Color.White.copy(alpha = 0.75f),
+    )
+
+    Slider(
+        value = lyricsFontScale,
+        onValueChange = onLyricsFontScaleChange,
+        valueRange = 0.7f..1.4f,
+        modifier = Modifier.weight(1f),
+    )
+
+    Text(
+        text = "A",
+        fontSize = 24.sp,
+        color = Color.White.copy(alpha = 0.95f),
+    )
+        }
+        if (onToggleFullscreen != null || onOpenLyricsOffset != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val playerInteraction = remember { MutableInteractionSource() }
-                val isPlayerPressed by playerInteraction.collectIsPressedAsState()
-                val playerScale by animateFloatAsState(
-                    targetValue = if (isPlayerPressed) 0.82f else 1.0f,
-                    animationSpec = ExpressiveMotion.spatialSpring(),
-                    label = "playerTabScale",
-                )
-                IconButton(
-                    onClick = onToggleFullscreen,
-                    interactionSource = playerInteraction,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .graphicsLayer {
-                            scaleX = playerScale
-                            scaleY = playerScale
-                        }
-                        .clip(CircleShape)
-                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playerInteraction)
-                        .background(
-                            liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
-                        ),
-                ) {
-                    Icon(
-                        if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                        contentDescription = if (isFullscreen) "Exit fullscreen lyrics" else "Fullscreen lyrics",
-                        modifier = Modifier.size(24.dp),
-                        tint = Color.White.copy(alpha = 0.90f),
+                if (onOpenLyricsOffset != null) {
+                    val offsetInteraction = remember { MutableInteractionSource() }
+                    val isOffsetPressed by offsetInteraction.collectIsPressedAsState()
+                    val offsetScale by animateFloatAsState(
+                        targetValue = if (isOffsetPressed) 0.82f else 1.0f,
+                        animationSpec = ExpressiveMotion.spatialSpring(),
+                        label = "lyricsOffsetScale",
                     )
+                    IconButton(
+                        onClick = onOpenLyricsOffset,
+                        interactionSource = offsetInteraction,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .graphicsLayer {
+                                scaleX = offsetScale
+                                scaleY = offsetScale
+                            }
+                            .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = offsetInteraction)
+                            .background(
+                                liquidGlassContainerColor(
+                                    if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                                    else Color.White.copy(alpha = 0.14f)
+                                ),
+                            ),
+                    ) {
+                        Icon(
+                            Icons.Filled.Timer,
+                            contentDescription = "Lyrics sync offset",
+                            modifier = Modifier.size(22.dp),
+                            tint = if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.90f),
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.size(44.dp))
+                }
+
+                if (onToggleFullscreen != null) {
+                    val playerInteraction = remember { MutableInteractionSource() }
+                    val isPlayerPressed by playerInteraction.collectIsPressedAsState()
+                    val playerScale by animateFloatAsState(
+                        targetValue = if (isPlayerPressed) 0.82f else 1.0f,
+                        animationSpec = ExpressiveMotion.spatialSpring(),
+                        label = "playerTabScale",
+                    )
+                    IconButton(
+                        onClick = onToggleFullscreen,
+                        interactionSource = playerInteraction,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .graphicsLayer {
+                                scaleX = playerScale
+                                scaleY = playerScale
+                            }
+                            .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playerInteraction)
+                            .background(
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                            ),
+                    ) {
+                        Icon(
+                            if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                            contentDescription = if (isFullscreen) "Exit fullscreen lyrics" else "Fullscreen lyrics",
+                            modifier = Modifier.size(24.dp),
+                            tint = Color.White.copy(alpha = 0.90f),
+                        )
+                    }
                 }
             }
         }
@@ -700,6 +812,9 @@ private fun ModernLyricsControls(
                 trackKey = state.current?.let { it.videoId ?: "${it.artist}|${it.title}" },
                 showTimeLabels = false,
                 modifier = Modifier.fillMaxWidth(),
+                primaryColor = primaryColor,
+                secondaryColor = secondaryColor,
+                tertiaryColor = tertiaryColor,
             )
         } else {
             PlayerProgressSlider(
@@ -715,6 +830,8 @@ private fun ModernLyricsControls(
                 enabled = totalDurationMs > 0,
                 modifier = Modifier.fillMaxWidth(),
                 interactionSource = seekInteraction,
+                primaryColor = primaryColor,
+                tertiaryColor = tertiaryColor,
             )
         }
 

@@ -3,8 +3,8 @@ package com.lastwave.app.ui.shell
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -59,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -204,6 +205,7 @@ fun MainShell(
     onOpenPlaylist: (Long) -> Unit = {},
     onOpenGenerator: () -> Unit = {},
     onOpenNewReleases: () -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
     mainShellViewModel: MainShellViewModel = hiltViewModel(),
 ) {
     val tabs = MainTab.entries
@@ -219,6 +221,19 @@ fun MainShell(
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    // Drive the dock selection from an explicit tab index instead of
+    // pagerState.currentPage. currentPage flips mid-scroll (halfway through
+    // animateScrollToPage), which re-triggers the pill width animation + the
+    // generator FAB enter/exit while the pager is still moving — the two
+    // competing size animations clip the dock (rectangular, limited) and let
+    // the FAB draw over the pill. Updating immediately on tap and syncing from
+    // settledPage on swipe keeps one clean transition.
+    var selectedTabIndex by remember { mutableIntStateOf(pagerState.currentPage) }
+    LaunchedEffect(pagerState.settledPage) {
+        if (selectedTabIndex != pagerState.settledPage) {
+            selectedTabIndex = pagerState.settledPage
+        }
+    }
     val updateInfo by mainShellViewModel.updateInfo.collectAsStateWithLifecycle()
     val showUpdateBanner = updateInfo.isUpdateAvailable && !updateInfo.isDismissed
     val backgroundColor = MaterialTheme.colorScheme.background
@@ -266,6 +281,7 @@ fun MainShell(
                         onOpenFriends = onOpenFriends,
                         onOpenFriendProfile = onOpenFriendProfile,
                         onOpenNewReleases = onOpenNewReleases,
+                        onOpenDownloads = onOpenDownloads,
                     )
                     MainTab.STATS -> HomeScreen(
                         onOpenSettings = onOpenSettings,
@@ -273,6 +289,7 @@ fun MainShell(
                         onOpenDiscover = onOpenDiscover,
                         onOpenGenres = onOpenGenres,
                         onOpenFriends = onOpenFriends,
+                        onOpenDownloads = onOpenDownloads,
                     )
                     MainTab.PLAYLISTS -> PlaylistScreen(onOpenPlaylist = onOpenPlaylist)
                     MainTab.DOWNLOADS -> DownloadsScreen()
@@ -364,8 +381,11 @@ fun MainShell(
         FloatingNavBar(
             backdrop = navigationBackdrop,
             tabs = tabs,
-            selectedIndex = pagerState.currentPage,
-            onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+            selectedIndex = selectedTabIndex,
+            onSelect = { index ->
+                if (index != selectedTabIndex) selectedTabIndex = index
+                scope.launch { pagerState.animateScrollToPage(index) }
+            },
             onOpenGenerator = onOpenGenerator,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
@@ -458,8 +478,11 @@ private fun FloatingNavBar(
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
             )
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .animateContentSize(animationSpec = navSpring()),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        // No animateContentSize here: the dock pills already animate their own
+        // width and the FAB animates its enter/exit size. Animating this outer
+        // wrapper at the same time squeezes the Row mid-transition, clipping
+        // the dock to a narrow rectangle and pushing the FAB over the pill.
         contentAlignment = Alignment.Center,
     ) {
         Row(
@@ -522,15 +545,27 @@ private fun FloatingNavBar(
                 }
             }
 
-            // Satellite Companion Generator Button (only visible on Playlists tab)
+            // Satellite Companion Generator Button (only visible on Playlists tab).
+            // Size-affecting enter/exit run with clip = false so the circular
+            // FAB is never sliced into a rectangle mid-transition, and the
+            // dock Row is never squeezed — the FAB grows beside the dock
+            // instead of drawing over the selected pill.
             AnimatedVisibility(
                 visible = selectedIndex == tabs.indexOf(MainTab.PLAYLISTS),
                 enter = fadeIn(animationSpec = tween(180)) +
-                    scaleIn(initialScale = 0.35f, animationSpec = navSpring()) +
-                    expandHorizontally(animationSpec = navSpring(), expandFrom = Alignment.End),
+                    scaleIn(initialScale = 0.6f, animationSpec = navSpring()) +
+                    expandHorizontally(
+                        animationSpec = navSpring(),
+                        expandFrom = Alignment.End,
+                        clip = false,
+                    ),
                 exit = fadeOut(animationSpec = tween(120)) +
-                    scaleOut(targetScale = 0.35f, animationSpec = navSpring()) +
-                    shrinkHorizontally(animationSpec = navSpring(), shrinkTowards = Alignment.End),
+                    scaleOut(targetScale = 0.6f, animationSpec = navSpring()) +
+                    shrinkHorizontally(
+                        animationSpec = navSpring(),
+                        shrinkTowards = Alignment.End,
+                        clip = false,
+                    ),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(Modifier.width(10.dp))
@@ -578,20 +613,28 @@ private fun FloatingNavItem(
         animationSpec = navSpring(),
         label = "navItemContent",
     )
+    // Animate the pill padding instead of jumping it: combined with the label
+    // expand below this gives one smooth width change. (Previously this
+    // Surface also had animateContentSize on top of the label expand — the two
+    // competing width animations clipped the pill to a rectangle and cut the
+    // label mid-switch.)
+    val horizontalPadding by animateDpAsState(
+        targetValue = if (selected) 18.dp else 12.dp,
+        animationSpec = navSpring(),
+        label = "navItemPadding",
+    )
 
     Surface(
         onClick = onClick,
         shape = PillShape,
         color = backgroundColor,
-        modifier = Modifier
-            .height(48.dp)
-            .animateContentSize(animationSpec = navSpring()),
+        modifier = Modifier.height(48.dp),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
             modifier = Modifier
-                .padding(horizontal = if (selected) 18.dp else 12.dp)
+                .padding(horizontal = horizontalPadding)
                 .height(48.dp),
         ) {
             Icon(
@@ -605,10 +648,12 @@ private fun FloatingNavItem(
                 enter = fadeIn(animationSpec = navSpring()) + expandHorizontally(
                     animationSpec = navSpring(),
                     expandFrom = Alignment.Start,
+                    clip = false,
                 ),
                 exit = fadeOut(animationSpec = tween(90)) + shrinkHorizontally(
                     animationSpec = navSpring(),
                     shrinkTowards = Alignment.Start,
+                    clip = false,
                 ),
             ) {
                 Row(

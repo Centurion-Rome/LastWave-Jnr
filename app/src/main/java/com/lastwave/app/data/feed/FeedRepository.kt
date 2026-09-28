@@ -682,14 +682,21 @@ class FeedRepository @Inject constructor(
                     isLiked = true,
                 ))
             }
-            val savedMix = homePlaylists.firstOrNull { it.title.equals("Mix", ignoreCase = true) }
-            add(savedMix?.let {
+            val savedMyMix = homePlaylists.firstOrNull { it.title.equals("My Mix", ignoreCase = true) || it.title.equals("Mix", ignoreCase = true) }
+            add(savedMyMix?.let {
                 FeedQuickTile(title = it.title, subtitle = it.author, artworkUrl = it.artworkUrl, playlistId = it.id)
-            } ?: FeedQuickTile(title = "Mix", subtitle = "Made for you",
-                artworkUrl = quickPicks.firstOrNull()?.artworkUrl, collection = "radio"))
+            } ?: FeedQuickTile(title = "My Mix", subtitle = "Endless radio",
+                artworkUrl = ytRecentSongs.firstOrNull()?.artworkUrl ?: quickPicks.firstOrNull()?.artworkUrl, collection = "radio"))
+            
+            val savedDiscoverMix = homePlaylists.firstOrNull { it.title.contains("Discover Mix", ignoreCase = true) }
+            add(savedDiscoverMix?.let {
+                FeedQuickTile(title = it.title, subtitle = it.author, artworkUrl = it.artworkUrl, playlistId = it.id)
+            } ?: FeedQuickTile(title = "Discover Mix", subtitle = "Made for you",
+                artworkUrl = quickPicks.lastOrNull()?.artworkUrl ?: quickPicks.firstOrNull()?.artworkUrl, collection = "radio"))
+
             add(
                 FeedQuickTile(
-                    title = "New releases",
+                    title = "New Releases",
                     subtitle = "Fresh drops",
                     artworkUrl = newReleases.firstOrNull()?.artworkUrl,
                     collection = "new_releases",

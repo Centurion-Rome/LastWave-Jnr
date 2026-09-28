@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.SyncDisabled
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -122,7 +123,14 @@ fun LyricsPanel(
     onRetry: () -> Unit,
     onToggleFullscreen: (() -> Unit)? = null,
     isFullscreen: Boolean = false,
+    onOpenLyricsOffset: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    /** Manual sync correction (ms, + = lyrics earlier). Applies to lyric
+     *  focus/highlight only — the seekbar below keeps true position. */
+    lyricsOffsetMs: Long = 0L,
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    secondaryColor: Color = MaterialTheme.colorScheme.secondary,
+    tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
 ) {
     val track = state.current ?: return
     val liquidGlass = LocalLiquidGlass.current
@@ -135,15 +143,15 @@ fun LyricsPanel(
     // High-precision frame-level monotonic position clock for 60/120fps bit-perfect vocal sync
     var smoothedPositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
 
-    LaunchedEffect(progress.positionMs, state.isPlaying) {
+    LaunchedEffect(progress.positionMs, state.isPlaying, track) {
         val drift = kotlin.math.abs(smoothedPositionMs - progress.positionMs)
-        // Hard snap on seek (>250ms drift) or when stopped/paused
-        if (drift > 250 || !state.isPlaying) {
+        // Hard snap on seek (>120ms drift) or when stopped/paused
+        if (drift > 120 || !state.isPlaying) {
             smoothedPositionMs = progress.positionMs
         }
     }
 
-    LaunchedEffect(state.isPlaying) {
+    LaunchedEffect(state.isPlaying, track) {
         if (!state.isPlaying) return@LaunchedEffect
         var lastFrameTime = SystemClock.elapsedRealtime()
         while (isActive) {
@@ -155,14 +163,13 @@ fun LyricsPanel(
                 val target = progress.positionMs
                 val dur = progress.durationMs.takeIf { it > 0 } ?: state.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
 
-                var nextPos = smoothedPositionMs + dt
-                val drift = target - nextPos
-                if (kotlin.math.abs(drift) > 250) {
-                    nextPos = target
+                val drift = target - (smoothedPositionMs + dt)
+                if (kotlin.math.abs(drift) > 120) {
+                    smoothedPositionMs = target.coerceIn(0L, dur)
                 } else {
-                    nextPos += (drift * 0.15f).toLong()
+                    val nextPos = smoothedPositionMs + dt + (drift * 0.25f).toLong()
+                    smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
                 }
-                smoothedPositionMs = nextPos.coerceAtLeast(smoothedPositionMs).coerceIn(0L, dur)
             }
         }
     }
@@ -224,7 +231,8 @@ fun LyricsPanel(
                         } else if (targetState.isSynced && targetState.lines.isNotEmpty()) {
                             SyncedLyricsList(
                                 lines = targetState.lines,
-                                currentPositionMs = smoothedPositionMs,
+                                currentPositionMs = smoothedPositionMs + lyricsOffsetMs,
+                                lyricsOffsetMs = lyricsOffsetMs,
                                 isPlaying = state.isPlaying,
                                 onSeek = player::seekTo,
                                 animationStyle = lyricsAnimation,
@@ -259,6 +267,11 @@ fun LyricsPanel(
             wavySeekbarEnabled = wavySeekbarEnabled,
             onToggleFullscreen = onToggleFullscreen,
             isFullscreen = isFullscreen,
+            lyricsOffsetMs = lyricsOffsetMs,
+            onOpenLyricsOffset = onOpenLyricsOffset,
+            primaryColor = primaryColor,
+            secondaryColor = secondaryColor,
+            tertiaryColor = tertiaryColor,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
@@ -276,6 +289,7 @@ private fun SyncedLyricsList(
     animationStyle: LyricsAnimation,
     liquidGlass: Boolean,
     modifier: Modifier = Modifier,
+    lyricsOffsetMs: Long = 0L,
 ) {
     val listState = rememberLazyListState()
     var userScrolledTime by remember { mutableLongStateOf(0L) }
@@ -354,18 +368,26 @@ private fun SyncedLyricsList(
             start = 16.dp,
             end = 16.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(
-            when (animationStyle) {
-                LyricsAnimation.APPLE_ZOOM -> 30.dp
-                LyricsAnimation.CARD_POP -> 24.dp
-                else -> 26.dp
-            },
-        ),
+        // Small base gap; each row appends its own trailing gap below so
+        // a lead row followed by backing vocals groups tight instead of
+        // sitting at the same constant distance as full phrases.
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        val fullRowGap = when (animationStyle) {
+            LyricsAnimation.APPLE_ZOOM -> 30.dp
+            LyricsAnimation.CARD_POP -> 24.dp
+            else -> 26.dp
+        }
         itemsIndexed(lines, key = { index, line -> "$index:${line.timeMs}" }) { index, line ->
             val isActive = index == activeIndex
             val isPast = activeIndex >= 0 && index < activeIndex
             val distance = kotlin.math.abs(index - activeIndex)
+            // Backing-vocal rows (every syllable flagged background) render
+            // dim and slightly smaller, grouped tight under their lead row.
+            val isBgRow = line.syllables.isNotEmpty() && line.syllables.all { it.isBackground }
+            val tightAfter = lines.getOrNull(index + 1)?.let { next ->
+                next.syllables.isNotEmpty() && next.syllables.all { it.isBackground }
+            } == true
             val isLineRtl = remember(line, isOverallRtl) {
                 line.isRtl || (isOverallRtl && (line.text.isBlank() || line.text == "♪"))
             }
@@ -566,7 +588,7 @@ private fun SyncedLyricsList(
                         .graphicsLayer {
                             scaleX = scale * pulseScale
                             scaleY = scale * pulseScale
-                            this.alpha = alpha
+                            this.alpha = alpha * if (isBgRow) (if (isActive) 0.85f else 0.55f) else 1f
                             this.translationX = translationX * density
                             this.translationY = translationY * density
                             rotationZ = rotation
@@ -577,23 +599,28 @@ private fun SyncedLyricsList(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                         ) {
-                            onSeek(line.timeMs)
+                            // Inverse of the highlight shift: tap targets audio time.
+                            onSeek((line.timeMs - lyricsOffsetMs).coerceAtLeast(0L))
                         }
                         .padding(
                             horizontal = if (animationStyle == LyricsAnimation.CARD_POP) 16.dp else 12.dp,
-                            vertical = if (isActive) 10.dp else 8.dp,
+                            vertical = if (isActive) 8.dp else 6.dp,
                         ),
                 ) {
-                    // Large type (~150% of titleLarge): lineHeight leaves room
-                    // for the focus zoom (up to 1.18x) so scaled rows neither
-                    // overlap neighbours nor clip at the list edges.
+                    // Compact type: lineHeight leaves room for the focus zoom
+                    // (up to 1.18x) so scaled rows neither overlap neighbours
+                    // nor clip at the list edges — without the old oversized
+                    // leading that stretched the gaps between rows. Backing
+                    // rows stay smaller and never take the lead weight.
                     val fontStyle = MaterialTheme.typography.titleLarge.copy(
-                        fontSize = 33.sp,
-                        fontWeight = if (isActive) {
+                        fontSize = if (isBgRow) 21.sp else 28.sp,
+                        fontWeight = if (isBgRow) {
+                            FontWeight.Medium
+                        } else if (isActive) {
                             if (animationStyle == LyricsAnimation.APPLE_ZOOM) FontWeight.Black else FontWeight.ExtraBold
                         } else FontWeight.SemiBold,
                         letterSpacing = (-0.2).sp,
-                        lineHeight = 48.sp,
+                        lineHeight = if (isBgRow) 30.sp else 40.sp,
                     )
 
                     WordByWordLyricLine(
@@ -607,8 +634,12 @@ private fun SyncedLyricsList(
                         animationStyle = animationStyle,
                         fontStyle = fontStyle,
                         isRtl = isLineRtl,
+                        modifier = Modifier.padding(start = if (isBgRow) 14.dp else 0.dp),
                     )
                 }
+            }
+            if (!tightAfter) {
+                Spacer(modifier = Modifier.height(fullRowGap - 4.dp))
             }
         }
     }
@@ -656,8 +687,8 @@ private fun WordByWordLyricLine(
                         Text(
                             text = line.transliteration,
                             style = MaterialTheme.typography.titleMedium.copy(
-                                fontSize = 22.sp,
-                                lineHeight = 32.sp,
+                                fontSize = 18.sp,
+                                lineHeight = 26.sp,
                                 fontWeight = FontWeight.Medium,
                                 letterSpacing = 0.2.sp,
                             ),
@@ -859,8 +890,8 @@ private fun PlainLyricsView(
             Text(
                 text = plainLyrics,
                 style = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = 28.sp,
-                    lineHeight = 46.sp,
+                    fontSize = 22.sp,
+                    lineHeight = 36.sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 0.1.sp,
                 ),
@@ -935,6 +966,11 @@ private fun LyricsPlaybackControls(
     wavySeekbarEnabled: Boolean = true,
     onToggleFullscreen: (() -> Unit)? = null,
     isFullscreen: Boolean = false,
+    lyricsOffsetMs: Long = 0L,
+    onOpenLyricsOffset: (() -> Unit)? = null,
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    secondaryColor: Color = MaterialTheme.colorScheme.secondary,
+    tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
     modifier: Modifier = Modifier,
 ) {
     // This Column performs layout only. It intentionally draws no container.
@@ -944,42 +980,81 @@ private fun LyricsPlaybackControls(
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (onToggleFullscreen != null) {
+        if (onToggleFullscreen != null || onOpenLyricsOffset != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val playerInteraction = remember { MutableInteractionSource() }
-                val isPlayerPressed by playerInteraction.collectIsPressedAsState()
-                val playerScale by animateFloatAsState(
-                    targetValue = if (isPlayerPressed) 0.82f else 1.0f,
-                    animationSpec = ExpressiveMotion.spatialSpring(),
-                    label = "playerTabScale",
-                )
-                IconButton(
-                    onClick = onToggleFullscreen,
-                    interactionSource = playerInteraction,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .graphicsLayer {
-                            scaleX = playerScale
-                            scaleY = playerScale
-                        }
-                        .clip(CircleShape)
-                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playerInteraction)
-                        .background(
-                            liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
-                        ),
-                ) {
-                    Icon(
-                        if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                        contentDescription = if (isFullscreen) "Exit fullscreen lyrics" else "Fullscreen lyrics",
-                        modifier = Modifier.size(24.dp),
-                        tint = Color.White.copy(alpha = 0.90f),
+                if (onOpenLyricsOffset != null) {
+                    val offsetInteraction = remember { MutableInteractionSource() }
+                    val isOffsetPressed by offsetInteraction.collectIsPressedAsState()
+                    val offsetScale by animateFloatAsState(
+                        targetValue = if (isOffsetPressed) 0.82f else 1.0f,
+                        animationSpec = ExpressiveMotion.spatialSpring(),
+                        label = "lyricsOffsetScale",
                     )
+                    IconButton(
+                        onClick = onOpenLyricsOffset,
+                        interactionSource = offsetInteraction,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .graphicsLayer {
+                                scaleX = offsetScale
+                                scaleY = offsetScale
+                            }
+                            .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = offsetInteraction)
+                            .background(
+                                liquidGlassContainerColor(
+                                    if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                                    else Color.White.copy(alpha = 0.14f)
+                                ),
+                            ),
+                    ) {
+                        Icon(
+                            Icons.Filled.Timer,
+                            contentDescription = "Lyrics sync offset",
+                            modifier = Modifier.size(22.dp),
+                            tint = if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.90f),
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.size(44.dp))
+                }
+
+                if (onToggleFullscreen != null) {
+                    val playerInteraction = remember { MutableInteractionSource() }
+                    val isPlayerPressed by playerInteraction.collectIsPressedAsState()
+                    val playerScale by animateFloatAsState(
+                        targetValue = if (isPlayerPressed) 0.82f else 1.0f,
+                        animationSpec = ExpressiveMotion.spatialSpring(),
+                        label = "playerTabScale",
+                    )
+                    IconButton(
+                        onClick = onToggleFullscreen,
+                        interactionSource = playerInteraction,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .graphicsLayer {
+                                scaleX = playerScale
+                                scaleY = playerScale
+                            }
+                            .clip(CircleShape)
+                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = playerInteraction)
+                            .background(
+                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                            ),
+                    ) {
+                        Icon(
+                            if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                            contentDescription = if (isFullscreen) "Exit fullscreen lyrics" else "Fullscreen lyrics",
+                            modifier = Modifier.size(24.dp),
+                            tint = Color.White.copy(alpha = 0.90f),
+                        )
+                    }
                 }
             }
         }
@@ -1011,6 +1086,9 @@ private fun LyricsPlaybackControls(
                 trackKey = state.current?.let { it.videoId ?: "${it.artist}|${it.title}" },
                 showTimeLabels = false,
                 modifier = Modifier.fillMaxWidth(),
+                primaryColor = primaryColor,
+                secondaryColor = secondaryColor,
+                tertiaryColor = tertiaryColor,
             )
         } else {
             PlayerProgressSlider(
@@ -1026,6 +1104,8 @@ private fun LyricsPlaybackControls(
                 enabled = totalDurationMs > 0,
                 modifier = Modifier.fillMaxWidth(),
                 interactionSource = seekInteraction,
+                primaryColor = primaryColor,
+                tertiaryColor = tertiaryColor,
             )
         }
 

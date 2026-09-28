@@ -8,9 +8,9 @@ on:
         required: true
         default: '4.2.2'
       release_name:
-        description: 'Release Title (e.g., LastWave-Jnr 4.1.1)'
+        description: 'Release Title (e.g., LastWave-Jnr 4.2.2)'
         required: true
-        default: 'LastWave-Jnr 4.1.1'
+        default: 'LastWave-Jnr 4.2.2'
       release_notes:
         description: 'Changelog / Release Notes'
         required: false

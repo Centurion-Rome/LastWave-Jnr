@@ -1,5 +1,6 @@
 package com.lastwave.app.ui.feed
 
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -139,6 +140,7 @@ fun FeedScreen(
     onOpenPlaylist: (Long) -> Unit = {},
     onOpenGenerator: () -> Unit = {},
     onOpenFriends: () -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
     onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
     onOpenNewReleases: () -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
@@ -203,7 +205,7 @@ fun FeedScreen(
             ExpressiveHeader(
                 title = "Home",
                 actions = {
-                    HeaderActionIcon(Icons.Filled.Explore, "Discover Radar", onOpenDiscover)
+                    HeaderActionIcon(Icons.Filled.Download, "Downloads", onOpenDownloads)
                     HeaderActionIcon(Icons.Filled.Search, "Search", onOpenSearch)
                     HeaderActionIcon(Icons.Filled.Settings, "Settings", onOpenSettings)
                 },
@@ -314,7 +316,7 @@ fun FeedScreen(
                                 tiles = quickTiles,
                                 onTileClick = { tile ->
                                     when {
-                                        tile.collection == "radio" -> viewModel.playInfiniteRadio()
+                                        tile.collection == "radio" -> onOpenDiscover()
                                         tile.collection == "yt_liked" || tile.playlistId == "yt_liked" -> onOpenFeedPlaylist("yt_liked")
                                         tile.collection == "yt_recent" || tile.playlistId == "yt_recent" -> onOpenFeedPlaylist("yt_recent")
                                         tile.collection == "new_releases" -> onOpenNewReleases()
@@ -1295,7 +1297,7 @@ private fun QuickTileCard(
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                val finalSubtitle = tile.subtitle ?: if (tile.actionVideoId != null) "Track" else "Playlist"
+                val finalSubtitle = if (isNewReleasesTile) "Fresh drops" else tile.subtitle ?: if (tile.actionVideoId != null) "Track" else "Playlist"
                 if (finalSubtitle.isNotEmpty()) {
                     Text(
                         text = finalSubtitle,

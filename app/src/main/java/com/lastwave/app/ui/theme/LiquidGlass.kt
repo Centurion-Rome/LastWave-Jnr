@@ -96,18 +96,23 @@ val LocalLiquidGlassContentBrightness = compositionLocalOf { 0f }
 typealias LayerBackdrop = LayerBackdrop
 typealias Backdrop = Backdrop
 
-/** Factory matching Kyant0 Backdrop's official API */
+/** Factory matching Kyant0 Backdrop's official API.
+ *
+ *  NOTE: the Compose compiler forbids try/catch (and runCatching) around
+ *  @Composable invocations, so this stays a direct passthrough. First-frame
+ *  safety comes from the [isDeviceGlassCapable] gate at every call site,
+ *  and any failure still lands in the crash-guard log + startup trail. */
 @Composable
 fun rememberLayerBackdrop(
     onDraw: androidx.compose.ui.graphics.drawscope.ContentDrawScope.() -> Unit = { drawContent() },
-): LayerBackdrop = com.kyant.backdrop.backdrops.rememberLayerBackdrop(onDraw = onDraw)
+): LayerBackdrop? = com.kyant.backdrop.backdrops.rememberLayerBackdrop(onDraw = onDraw)
 
 /** Marks a composable as the source layer that sibling glass surfaces refract. */
 fun Modifier.layerBackdropCompat(backdrop: LayerBackdrop): Modifier = this.nativeBackdrop(backdrop)
 
 /** Remember a backdrop that draws a flat color + content. */
 @Composable
-fun rememberBackdrop(color: Color): LayerBackdrop =
+fun rememberBackdrop(color: Color): LayerBackdrop? =
     rememberLayerBackdrop {
         drawRect(color)
         drawContent()

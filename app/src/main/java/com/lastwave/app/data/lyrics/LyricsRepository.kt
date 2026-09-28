@@ -76,7 +76,6 @@ sealed interface LyricsResult {
 
 @Singleton
 class LyricsRepository @Inject constructor(
-    private val lyricsPlusApi: LyricsPlusApi,
     private val betterLyricsApi: BetterLyricsApi,
     private val kugouApi: KugouLyricsApi,
     private val lrclibApi: LrclibLyricsApi,
@@ -116,6 +115,12 @@ class LyricsRepository @Inject constructor(
         }.getOrDefault(com.lastwave.app.data.local.LyricsProvider.AUTO)
         val effectiveVideoId = videoId?.trim()?.takeIf { it.isNotBlank() }
         val cacheKey = "${effectiveVideoId ?: ""}|${artist.trim().lowercase()}|${title.trim().lowercase()}|${album?.trim()?.lowercase()}|$durationSeconds|$wordByWord|${preferred.id}"
+        // Bounded: a long session must not grow this map without limit.
+        // Eviction is coarse (oldest-first is untracked); a miss re-fetches
+        // in milliseconds, so dropping hot entries only costs one fetch.
+        if (cache.size > 320) {
+            runCatching { cache.keys.take(64).forEach { cache.remove(it) } }
+        }
         if (!forceRefresh) {
             cache[cacheKey]?.takeIf {
                 !wordByWord || (it is LyricsResult.Success && (it.isWordSynced || it.isInstrumental))
@@ -256,16 +261,18 @@ class LyricsRepository @Inject constructor(
                     onPartialResult(single)
                 }
             }
-            val wordResult = coroutineScope {
-                val requests = mutableListOf(
+            // Bounded end-to-end: one slow-drip provider must never hold the
+            // panel hostage. Whatever validated fallback exists at the
+            // deadline still flows through the normal fallback chain below.
+            var lineFallback: LyricsResult.Success? = null
+            val wordResult = withTimeoutOrNull(RACE_TOTAL_MS) {
+                coroutineScope {
+                    val requests = mutableListOf(
                     async<LyricsResult.Success?> {
                         fetchWordFromAppleMusic(title, artist, album, durationSeconds)
                     },
                     async<LyricsResult.Success?> {
                         fetchWordFromBini(title, artist, album, durationSeconds, recordingIsrc, biniHit, effectiveVideoId)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromLyricsPlus(title, artist, album, durationSeconds, recordingIsrc)
                     },
                     async<LyricsResult.Success?> {
                         fetchWordFromBetterLyrics(title, artist, album, durationSeconds)
@@ -277,7 +284,6 @@ class LyricsRepository @Inject constructor(
                         fetchWordFromSimpMusic(effectiveVideoId, durationSeconds)
                     },
                 )
-                var lineFallback: LyricsResult.Success? = null
                 try {
                     while (requests.isNotEmpty()) {
                         val (request, result) = select {
@@ -286,8 +292,21 @@ class LyricsRepository @Inject constructor(
                             }
                         }
                         requests.remove(request)
-                        if (result?.isWordSynced == true) return@coroutineScope result
-                        if (result != null && lineFallback == null) {
+                        if (result?.isWordSynced == true) {
+                            // Fastest word-sync wins — but only if its
+                            // timeline plausibly fits this recording. A
+                            // wrong-cut hit keeps racing as a line fallback
+                            // instead of locking in broken sync.
+                            if (result.isInstrumental || plausibleDuration(result.lines, durationSeconds)) {
+                                return@coroutineScope result
+                            }
+                        }
+                        // Line-sync fallback must also fit the recording: an
+                        // unchecked wrong-cut timeline is exactly how plain
+                        // line-by-line sync breaks.
+                        if (result != null && lineFallback == null &&
+                            (result.isInstrumental || plausibleDuration(result.lines, durationSeconds))
+                        ) {
                             lineFallback = result
                             onPartialResult(result)
                         }
@@ -296,6 +315,7 @@ class LyricsRepository @Inject constructor(
                 } finally {
                     requests.forEach { it.cancel() }
                 }
+            }
             }
             if (wordResult?.isWordSynced == true) {
                 cache[cacheKey] = wordResult
@@ -306,9 +326,12 @@ class LyricsRepository @Inject constructor(
                 cache[cacheKey] = it
                 return@withContext it
             }
-            if (wordResult != null) {
-                cache[cacheKey] = wordResult
-                return@withContext wordResult
+            // Full completion returns the fallback through wordResult; a
+            // timed-out race leaves it in the outer var — either way the
+            // validated partial still counts instead of dropping to Empty.
+            (wordResult ?: lineFallback)?.let { settled ->
+                cache[cacheKey] = settled
+                return@withContext settled
             }
             // Extra line-sync catalogue: biggest database, tried after the
             // word race so a timed hit from anywhere above still wins.
@@ -425,8 +448,6 @@ class LyricsRepository @Inject constructor(
     ): LyricsResult.Success? = when (preferred) {
         com.lastwave.app.data.local.LyricsProvider.APPLE_MUSIC ->
             fetchWordFromAppleMusic(title, artist, album, durationSeconds)
-        com.lastwave.app.data.local.LyricsProvider.LYRICS_PLUS ->
-            fetchWordFromLyricsPlus(title, artist, album, durationSeconds, isrc)
         com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS ->
             fetchWordFromBetterLyrics(title, artist, album, durationSeconds)
         com.lastwave.app.data.local.LyricsProvider.KUGOU ->
@@ -448,6 +469,9 @@ class LyricsRepository @Inject constructor(
     ): LyricsResult.Success? {
         return try {
             appleMusicApi.fetchLyrics(title, artist, album, durationSeconds)
+                // Like every other fuzzy provider: a same-title wrong-cut
+                // timeline must not win the race on speed alone.
+                ?.takeIf { it.isInstrumental || plausibleDuration(it.lines, durationSeconds) }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (_: Exception) {
@@ -521,6 +545,9 @@ class LyricsRepository @Inject constructor(
         try {
             val lines = musixmatchApi.fetchLyrics(title, artist, durationSeconds)
             if (!lines.isNullOrEmpty()) {
+                // Server fuzzy-matches with no usable candidate identity:
+                // reject wrong-cut timelines before they poison line-sync.
+                if (!plausibleDuration(lines, durationSeconds)) return null
                 return LyricsResult.Success(
                     lines = lines,
                     isSynced = true,
@@ -529,70 +556,6 @@ class LyricsRepository @Inject constructor(
                     isInstrumental = false,
                     source = "Catalog (Line-Sync)",
                 )
-            }
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-        }
-        return null
-    }
-
-    private suspend fun fetchWordFromLyricsPlus(
-        title: String,
-        artist: String,
-        album: String?,
-        durationSeconds: Int?,
-        isrc: String? = null,
-    ): LyricsResult.Success? {
-        try {
-            val wordResponse = lyricsPlusApi.fetchWordLyrics(title, artist, album, durationSeconds, isrc)
-            if (wordResponse != null && !wordResponse.lyrics.isNullOrEmpty()) {
-                val lines = wordResponse.lyrics.map { line ->
-                    val syllables = line.syllabus?.map { syl ->
-                        LyricSyllable(
-                            timeMs = syl.time,
-                            durationMs = syl.duration,
-                            text = syl.text,
-                            isBackground = syl.isBackground,
-                        )
-                    } ?: emptyList()
-
-                    val transliterationSyllables = line.transliteration?.syllabus?.map { syl ->
-                        LyricSyllable(
-                            timeMs = syl.time,
-                            durationMs = syl.duration,
-                            text = syl.text,
-                            isBackground = syl.isBackground,
-                        )
-                    } ?: emptyList()
-
-                    LyricLine(
-                        timeMs = line.time,
-                        durationMs = line.duration,
-                        text = line.text,
-                        syllables = syllables,
-                        transliteration = line.transliteration?.text,
-                        transliterationSyllables = transliterationSyllables,
-                    )
-                }.sortedBy { it.timeMs }
-
-                if (lines.isNotEmpty()) {
-                    // LyricsPlus fuzzy-matches server-side with no candidate
-                    // metadata in the response, so a same-title wrong-artist
-                    // hit can't be filtered by text. Duration plausibility is
-                    // the only client-side signal: reject timelines that
-                    // overrun the track or cover less than half of it.
-                    if (!plausibleDuration(lines, durationSeconds)) return null
-                    val hasWordTiming = lines.any { it.hasSyllables }
-                    return LyricsResult.Success(
-                        lines = lines,
-                        isSynced = true,
-                        isWordSynced = hasWordTiming,
-                        plainLyrics = lines.joinToString("\n") { it.text },
-                        isInstrumental = false,
-                        source = if (hasWordTiming) "LyricsPlus (Word-Sync)" else "LyricsPlus (Line-Sync)",
-                    )
-                }
             }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
@@ -615,8 +578,7 @@ class LyricsRepository @Inject constructor(
                 album,
             ) ?: betterLyricsApi.fetchWordLyrics(title, artist, durationSeconds, album)
             if (!betterLines.isNullOrEmpty()) {
-                // Same unverified-fuzzy situation as LyricsPlus (TTML carries
-                // no candidate identity): duration plausibility only.
+                // TTML carries no candidate identity: duration plausibility only.
                 if (!plausibleDuration(betterLines, durationSeconds)) return null
                 val hasWordTiming = betterLines.any { it.hasSyllables }
                 return LyricsResult.Success(
@@ -643,6 +605,7 @@ class LyricsRepository @Inject constructor(
         try {
             val kugouLines = kugouApi.fetchWordLyrics(title, artist, durationSeconds)
             if (!kugouLines.isNullOrEmpty()) {
+                if (!plausibleDuration(kugouLines, durationSeconds)) return null
                 val hasWordTiming = kugouLines.any { it.hasSyllables }
                 return LyricsResult.Success(
                     lines = kugouLines,
@@ -723,7 +686,7 @@ class LyricsRepository @Inject constructor(
 
         /**
          * Duration plausibility for providers whose responses carry no
-         * candidate identity (LyricsPlus, BetterLyrics): the server
+         * candidate identity (BetterLyrics): the server
          * fuzzy-matches, so a same-title wrong-artist hit is otherwise
          * undetectable client-side. The lyric timeline must roughly fit the
          * track: reject timelines running 45s+ past the end, or covering
@@ -748,9 +711,107 @@ class LyricsRepository @Inject constructor(
         private val TIMESTAMP_REGEX = Regex("""\[(\d{1,2}):(\d{2})(?:[.:](\d{2,3}))?\]""")
         private val WORD_STAMP_REGEX = Regex("""<(\d{1,3}):(\d{2})[.:](\d{2,3})>""")
         private val OFFSET_REGEX = Regex("""\[offset:\s*([+-]?\d+)\s*\]""", RegexOption.IGNORE_CASE)
+        /**
+         * Backing vocals in LRC have no role markup — convention is a fully
+         * parenthesized row ("(ooh, yeah)"). Dots/brackets are timestamps,
+         * never vocals, so only parens count.
+         */
+        fun isBackgroundVocalText(text: String): Boolean {
+            val t = text.trim()
+            if (t.length < 3 || !t.startsWith('(') || !t.endsWith(')')) return false
+            var depth = 0
+            for (i in t.indices) {
+                when (t[i]) {
+                    '(' -> depth++
+                    ')' -> depth--
+                }
+                if (depth == 0) return i == t.lastIndex
+            }
+            return false
+        }
+
+        /** Display form of a backing row: one outer paren pair off, inners kept. */
+        fun stripBackgroundParens(text: String): String =
+            if (isBackgroundVocalText(text)) {
+                val t = text.trim()
+                t.substring(1, t.length - 1).trim()
+            } else text
+
+        /** A row whose every syllable is backing — renders dim, never as lead. */
+        fun LyricLine.isBackgroundLine(): Boolean =
+            syllables.isNotEmpty() && syllables.all { it.isBackground }
+
+        /** Terminal punctuation: a row ending here never continues below it. */
+        private val TERMINAL_PUNCT = setOf('.', '?', '!', '…', '。', '？', '！', '।', '॥', '؛', '؟', '。')
+        private const val CONTINUATION_GAP_WORD_MS = 1000L
+        private const val CONTINUATION_GAP_LINE_MS = 400L
+        private const val CONTINUATION_MAX_SPAN_MS = 8000L
+        private const val CONTINUATION_MAX_CHARS = 140
+
+        /**
+         * Groups continuation rows: a row that picks up within a breath of
+         * the previous row's end (and the previous row doesn't end with
+         * terminal punctuation) is one phrase split across timestamps, so
+         * the two merge into a single visual group instead of two
+         * constant-gapped rows. Word-sync pairs keep per-word timing, so
+         * the karaoke fill stays truthful; line-sync pairs only merge on a
+         * tiny gap where the early highlight is negligible. Backing rows,
+         * blanks and ♪ markers never merge. Bounded: no chaining past a
+         * span/text cap, overlaps/duets never merge (gap < 0).
+         */
+        fun mergeContinuationLines(lines: List<LyricLine>): List<LyricLine> {
+            if (lines.size < 2) return lines
+            val out = mutableListOf<LyricLine>()
+            var cur: LyricLine? = null
+            fun flush() {
+                cur?.let(out::add)
+                cur = null
+            }
+            for (line in lines) {
+                val c = cur
+                if (c == null) {
+                    cur = line
+                    continue
+                }
+                val cEnd = c.timeMs + c.durationMs
+                val nEnd = line.timeMs + line.durationMs
+                val gap = line.timeMs - cEnd
+                val bothWordSync = c.hasSyllables && line.hasSyllables
+                val gapCap = if (bothWordSync) CONTINUATION_GAP_WORD_MS else CONTINUATION_GAP_LINE_MS
+                val canMerge = !c.isBackgroundLine() && !line.isBackgroundLine() &&
+                    c.text.isNotBlank() && line.text.isNotBlank() &&
+                    c.text.trim() != "♪" && line.text.trim() != "♪" &&
+                    gap in 0..gapCap &&
+                    c.text.trimEnd().lastOrNull() !in TERMINAL_PUNCT &&
+                    (nEnd - c.timeMs) <= CONTINUATION_MAX_SPAN_MS &&
+                    (c.text.length + 1 + line.text.length) <= CONTINUATION_MAX_CHARS
+                if (!canMerge) {
+                    flush()
+                    cur = line
+                    continue
+                }
+                cur = c.copy(
+                    durationMs = (maxOf(cEnd, nEnd) - c.timeMs).coerceAtLeast(0L),
+                    text = (c.text.trimEnd() + " " + line.text.trimStart()).trim(),
+                    syllables = (c.syllables + line.syllables).sortedBy { it.timeMs },
+                    transliteration = listOfNotNull(
+                        c.transliteration?.takeIf { it.isNotBlank() },
+                        line.transliteration?.takeIf { it.isNotBlank() },
+                    ).joinToString(" ").takeIf { it.isNotBlank() },
+                    transliterationSyllables = (c.transliterationSyllables + line.transliterationSyllables)
+                        .sortedBy { it.timeMs },
+                )
+            }
+            flush()
+            return out
+        }
         /** Head start for the preferred provider before the automatic race
          *  takes over: bounds hangs, typical hits resolve well inside it. */
         private const val PREFERRED_HEAD_START_MS = 4_000L
+        /** Hard ceiling for the whole provider race: slower than any single
+         *  healthy round-trip, faster than socket worst cases. A slow-drip
+         *  provider can delay the final fallback, never deny it. */
+        private const val RACE_TOTAL_MS = 12_000L
         private const val IDENTIFY_TIMEOUT_MS = 2_500L
 
         private val SEARCH_WHITESPACE = Regex("""\s+""")
@@ -869,26 +930,45 @@ class LyricsRepository @Inject constructor(
                 val nextStart = raws.getOrNull(index + 1)?.timeMs
                 val cleanText = decodeEntities(raw.body.replace(WORD_STAMP_REGEX, "").trim())
                 val words = parseWordRuns(raw.body, raw.timeMs, nextStart)
+                // Backing vocals ride as dim rows, never bright lead rows.
+                val isBg = isBackgroundVocalText(cleanText)
+                val displayText = if (isBg) stripBackgroundParens(cleanText) else cleanText
                 if (words.isNotEmpty()) {
                     val lineStart = minOf(raw.timeMs, words.first().timeMs)
                     val joined = words.joinToString(" ") { it.text }
                     // Keep the author spacing when the plain body carries
                     // punctuation the word join would rewrite.
-                    val text = if (cleanText.isNotBlank() && cleanText.length >= joined.length) {
-                        cleanText
+                    val text = if (!isBg && displayText.isNotBlank() && displayText.length >= joined.length) {
+                        displayText
+                    } else if (isBg) {
+                        displayText.ifBlank { joined }
                     } else joined
                     result += LyricLine(
                         timeMs = lineStart,
                         durationMs = ((nextStart ?: (words.maxOf { it.timeMs + it.durationMs })) - lineStart).coerceAtLeast(0L),
                         text = text,
-                        syllables = words,
+                        syllables = if (isBg) words.map { it.copy(isBackground = true) } else words,
                     )
                 } else {
+                    val lineDuration = if (nextStart != null && nextStart > raw.timeMs) nextStart - raw.timeMs else 0L
+                    // Line-sync backing rows get one covering bg syllable so
+                    // downstream renders them as dim accompaniment rows with
+                    // a real focus window instead of bright lead rows.
+                    val syllables = if (isBg && displayText.isNotBlank()) {
+                        listOf(
+                            LyricSyllable(
+                                timeMs = raw.timeMs,
+                                durationMs = lineDuration.takeIf { it > 0 } ?: 4000L,
+                                text = displayText,
+                                isBackground = true,
+                            ),
+                        )
+                    } else emptyList()
                     result += LyricLine(
                         timeMs = raw.timeMs,
-                        durationMs = if (nextStart != null && nextStart > raw.timeMs) nextStart - raw.timeMs else 0L,
-                        text = cleanText,
-                        syllables = emptyList(),
+                        durationMs = lineDuration,
+                        text = displayText,
+                        syllables = syllables,
                     )
                 }
             }

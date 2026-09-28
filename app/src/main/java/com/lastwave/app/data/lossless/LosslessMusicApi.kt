@@ -62,7 +62,17 @@ private data class TidalCandidateItem(
     val isAtmos: Boolean = false,
     val isSpatial: Boolean = false,
     val rawAddonId: String = "",
-)
+    /** Addon search flag (HI_RES_LOSSLESS vs LOSSLESS). Upstream answers a
+     *  hi_res /stream with HTTP 200 + 16-bit on CD-only masters instead of
+     *  an error, so without this the resolver stops at the first
+     *  downgraded success and a 24-bit master later in the list is never
+     *  tried. */
+    val audioQuality: String = "",
+) {
+    fun isHiResFlagged(): Boolean =
+        audioQuality.contains("HI_RES", ignoreCase = true) ||
+            audioQuality.contains("HI-RES", ignoreCase = true)
+}
 
 @Singleton
 class LosslessMusicApi @Inject constructor(
@@ -201,6 +211,13 @@ class LosslessMusicApi @Inject constructor(
         fun isAtmosStreamUrl(url: String): Boolean {
             if (!url.startsWith("data:application/dash+xml")) return false
             return isAtmosCodec(manifestCodecOf(url))
+        }
+
+        /** True when the stream points to a known prank or decoy CDN stream. */
+        fun isDecoyStream(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+            val lower = url.lowercase()
+            return lower.contains("pranks-cdn") || lower.contains("definatelynagato")
         }
 
         /**
@@ -387,9 +404,13 @@ class LosslessMusicApi @Inject constructor(
         val addonClient = AddonClient(addonBaseUrl, client, nativeSecrets = nativeSecrets)
         val cleanArtist = cleanForSearch(artist).ifBlank { artist }
         val cleanTitle = cleanForSearch(title).ifBlank { title }
-        val queries = listOf(
+        val unaccentTitle = normalizeText(cleanTitle)
+        val unaccentArtist = normalizeText(cleanArtist)
+        val queries = listOfNotNull(
             "$cleanTitle $cleanArtist".trim(),
+            if (unaccentTitle.isNotBlank() && unaccentTitle != cleanTitle.lowercase()) "$unaccentTitle $unaccentArtist".trim() else null,
             cleanTitle.trim(),
+            if (unaccentTitle.isNotBlank() && unaccentTitle != cleanTitle.lowercase()) unaccentTitle.trim() else null,
         ).distinct()
 
         val isAtmosPreferred = preferredQuality == QUALITY_DOLBY_ATMOS
@@ -422,6 +443,7 @@ class LosslessMusicApi @Inject constructor(
                         isAtmos = track.atmos || track.audioModes.any { it.contains("DOLBY", ignoreCase = true) || it.contains("ATMOS", ignoreCase = true) },
                         isSpatial = track.audioModes.any { it.contains("360", ignoreCase = true) || it.contains("SPATIAL", ignoreCase = true) },
                         rawAddonId = track.id,
+                        audioQuality = track.audioQuality,
                     )
                 }
                 .mapNotNull { item ->
@@ -456,47 +478,99 @@ class LosslessMusicApi @Inject constructor(
             return null
         }
 
-        val qualitiesToTry = if (isAtmosPreferred) listOf("atmos", "lossless", "high") else listOf(qualityParam, "lossless", "high")
+        // Hi-res preference: hi-res-flagged masters first (stable — score
+        // order kept within each group). A CD-only master otherwise scores
+        // identically to the 24-bit master and backend order wins the coin
+        // flip, parking playback at 16-bit forever.
+        val wantsHiRes = (qualityParam == "hi_res" || isAtmosPreferred)
+        val ordered = if (wantsHiRes) {
+            candidates.sortedWith(compareByDescending<TidalCandidateItem> { it.isHiResFlagged() })
+        } else {
+            candidates
+        }
+
+        val qualitiesToTry = if (isAtmosPreferred) listOf("atmos", "hi_res", "lossless", "high") else listOf(qualityParam, "lossless", "high")
         for (q in qualitiesToTry) {
-            val wantAtmos = q == "atmos" || isAtmosPreferred
+            val wantAtmos = q == "atmos"
             val targetCandidates = if (wantAtmos) {
-                val atmosMatches = candidates.filter { it.isAtmos || it.isSpatial }
-                if (atmosMatches.isNotEmpty()) atmosMatches else listOf(candidates.first())
+                val atmosMatches = ordered.filter { it.isAtmos || it.isSpatial }
+                if (atmosMatches.isNotEmpty()) atmosMatches else listOf(ordered.first())
             } else {
-                val stereoMatches = candidates.filter { !it.isAtmos && !it.isSpatial }
-                if (stereoMatches.isNotEmpty()) stereoMatches else candidates
+                val stereoMatches = ordered.filter { !it.isAtmos && !it.isSpatial }
+                if (stereoMatches.isNotEmpty()) stereoMatches else ordered
             }
 
-            for (candidate in targetCandidates.take(2)) {
+            // Hi-res tier scans wider: a silently-downgraded 16-bit answer
+            // below must not consume the attempt budget for the whole tier.
+            val tierBudget = if (wantsHiRes && q == "hi_res") 4 else 2
+            for (candidate in targetCandidates.take(tierBudget)) {
                 currentCoroutineContext().ensureActive()
                 val trackId = candidate.rawAddonId.ifBlank { candidate.id.toString() }
                 val streamResult = addonClient.stream(trackId, q, wantAtmos, isDownload = isDownload)
                 val stream = streamResult.getOrNull() ?: continue
 
                 val rawUrl = stream.dataUrl?.takeIf { it.isNotBlank() }
-                    ?: stream.url.takeIf { it.isNotBlank() }
                     ?: stream.manifestXml?.takeIf { it.isNotBlank() }?.let { xml ->
                         val b64 = android.util.Base64.encodeToString(xml.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                         "data:application/dash+xml;base64,$b64"
                     }
+                    ?: stream.url.takeIf { it.isNotBlank() }
                     ?: continue
 
                 if (rawUrl in excludedUrls) continue
+                if (isDecoyStream(rawUrl) || isDecoyStream(stream.url)) {
+                    Log.w(TAG, "resolveFromAddon: candidate $trackId returned decoy prank stream ($rawUrl); skipping")
+                    continue
+                }
                 if (!wantAtmos && isAtmosStreamUrl(rawUrl)) continue
 
-                val isStreamAtmos = wantAtmos || (stream.audioMode?.contains("ATMOS", ignoreCase = true) == true) || isAtmosStreamUrl(rawUrl)
+                // Atmos is a property of the STREAM (audioMode flag or spatial
+                // URL), never of the request: a stereo fallback for an Atmos
+                // preference must be labeled (and badged) as what it is.
+                val isStreamAtmos = (stream.audioMode?.contains("ATMOS", ignoreCase = true) == true) || isAtmosStreamUrl(rawUrl)
+
+                // Downloads never upscale to spatial: a hi-res/CD/320 request
+                // must not come home as Dolby (the URL check above misses
+                // manifests whose spatial-ness is only in the audioMode flag).
+                // Streaming is untouched — only downloads take this path.
+                if (isDownload && !isAtmosPreferred && isStreamAtmos) {
+                    Log.i(TAG, "resolveFromAddon: skipping spatial stream for track $trackId (download tier is stereo-only)")
+                    continue
+                }
                 val manifestSampleRate = manifestSampleRateOf(rawUrl)
                 val rawSampleRate = if (stream.sampleRate > 1000) stream.sampleRate else stream.sampleRate * 1000.0
                 val effectiveSampleRate = manifestSampleRate?.toDouble() ?: rawSampleRate
-                val effectiveBitDepth = if (stream.bitDepth > 16) stream.bitDepth
-                    else if (effectiveSampleRate > 48000.0) 24
-                    else stream.bitDepth
+                val isHiResFlagged = candidate.isHiResFlagged() ||
+                    stream.quality.contains("HI_RES", ignoreCase = true) ||
+                    stream.quality.contains("HI-RES", ignoreCase = true) ||
+                    (wantsHiRes && q == "hi_res") ||
+                    effectiveSampleRate > 48000.0
+                val effectiveBitDepth = when {
+                    stream.bitDepth > 16 -> stream.bitDepth
+                    effectiveSampleRate > 192000.0 -> 32
+                    isHiResFlagged -> 24
+                    else -> stream.bitDepth
+                }
                 val formatId = when {
                     isStreamAtmos -> QUALITY_DOLBY_ATMOS
-                    effectiveBitDepth > 16 || effectiveSampleRate > 48000.0 -> QUALITY_MAX_HI_RES
+                    effectiveBitDepth > 16 || effectiveSampleRate > 48000.0 || isHiResFlagged -> {
+                        if (effectiveSampleRate > 96000.0) QUALITY_MAX_HI_RES else QUALITY_HI_RES_96
+                    }
                     stream.codec.equals("flac", ignoreCase = true) || effectiveBitDepth == 16 -> QUALITY_CD_LOSSLESS
                     stream.quality.equals("high", ignoreCase = true) -> QUALITY_MP3_320
                     else -> QUALITY_CD_LOSSLESS
+                }
+
+                // A hi_res request answered with ≤16-bit/≤48kHz is a silent
+                // downgrade (CD-only master), not a hi-res hit: keep
+                // scanning candidates instead of parking playback at 16-bit
+                // while a 24-bit master sits later in the list. The
+                // "lossless" tier below still accepts 16-bit normally.
+                val isHiResTierHit = formatId == QUALITY_MAX_HI_RES || formatId == QUALITY_HI_RES_96
+                val isHiResAttempt = q == "hi_res"
+                if (isHiResAttempt && !isStreamAtmos && !isHiResTierHit) {
+                    Log.i(TAG, "resolveFromAddon: candidate $trackId answered hi_res with ${effectiveBitDepth}-bit/${effectiveSampleRate}Hz; trying next candidate")
+                    continue
                 }
 
                 Log.i(TAG, "resolveFromAddon: Acquired stream for track $trackId: formatId=$formatId, bitDepth=$effectiveBitDepth, sampleRate=${effectiveSampleRate}Hz, codec=${stream.codec}")
@@ -548,9 +622,13 @@ class LosslessMusicApi @Inject constructor(
             .map(::normalizeText)
             .filter(String::isNotBlank)
 
-        val artistExact = primaryIdentities.any { iden ->
-            targetArtists.any { ta -> iden == ta }
-        }
+        val candidateArtists = primaryIdentities
+            .flatMap { it.split(Regex("""(?i)\s*(?:&|,|\bx\b|feat\.?|ft\.?|featuring|with|\+)\s*""")) }
+            .map(::normalizeText)
+            .filter(String::isNotBlank)
+
+        val artistExact = primaryIdentities.any { iden -> targetArtists.any { ta -> iden == ta } } ||
+            candidateArtists.any { ca -> targetArtists.any { ta -> ca == ta } }
 
         val titleDistance = levenshtein(targetTitle, candidateTitle)
         val isExactMatch = targetTitle == candidateTitle
@@ -586,14 +664,19 @@ class LosslessMusicApi @Inject constructor(
             return null
         }
 
+        val maxDurationDifference = when {
+            isExactMatch && artistExact && !variantMismatch -> 12
+            isExactMatch || artistExact -> 8
+            else -> MAX_DURATION_DIFFERENCE_SECONDS
+        }
         val durationDifference = if (expectedDurationSeconds != null && expectedDurationSeconds > 0) {
             if (item.duration <= 0) {
                 Log.d(TAG, "reject candidate id=${item.id}: missing duration for '$title'")
                 return null
             }
             kotlin.math.abs(item.duration - expectedDurationSeconds).also {
-                if (it > MAX_DURATION_DIFFERENCE_SECONDS) {
-                    Log.d(TAG, "reject candidate id=${item.id}: duration ${item.duration}s vs expected ${expectedDurationSeconds}s (Δ${it}s) for '$title'")
+                if (it > maxDurationDifference) {
+                    Log.d(TAG, "reject candidate id=${item.id}: duration ${item.duration}s vs expected ${expectedDurationSeconds}s (Δ${it}s > ${maxDurationDifference}s) for '$title'")
                     return null
                 }
             }
@@ -631,7 +714,7 @@ class LosslessMusicApi @Inject constructor(
                 }
             }
         }
-        durationDifference?.let { score += (MAX_DURATION_DIFFERENCE_SECONDS - it) * 10 }
+        durationDifference?.let { score += (maxDurationDifference - it) * 10 }
         return score
     }
 

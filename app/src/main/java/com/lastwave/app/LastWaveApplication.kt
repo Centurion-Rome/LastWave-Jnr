@@ -41,16 +41,20 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
         // are created before Application.onCreate(). Install diagnostics here
         // so failures in that earlier device-dependent phase are not lost.
         CrashGuard.install(this)
+        StartupTrail.begin(this)
+        StartupTrail.mark("app.attach")
     }
 
     override fun onCreate() {
         super.onCreate()
+        StartupTrail.mark("app.onCreate.start")
         // Sync per-app locale (Settings -> Language) before any UI is drawn.
         // AppCompat restores the last requested locale itself; the collector
         // inside keeps it in sync with DataStore afterwards.
         runCatching { appLocaleManager.get().start() }
         runCatching { com.lastwave.app.playback.PlaybackDiagnostics.install(this) }
         runCatching { com.lastwave.app.data.music.potoken.BotGuardTokenGenerator.initialize(this) }
+        runCatching { com.lastwave.app.data.canvas.CanvasCache.init(this) }
         applicationScope.launch(Dispatchers.IO) {
             delay(OPTIONAL_STARTUP_DELAY_MS)
             // A process kill can bypass TrackDownloadManager's finally block
@@ -126,6 +130,7 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
                 android.util.Log.e("LastWaveStartup", "Widget theme observer disabled", error)
             }
         }
+        StartupTrail.mark("app.onCreate.end")
     }
 
     /**

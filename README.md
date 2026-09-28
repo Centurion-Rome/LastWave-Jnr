@@ -81,8 +81,8 @@ Built with **Material 3 Expressive**, LastWave combines effortless ad-free strea
 
 ## <img src="https://api.iconify.design/lucide:rocket.svg?color=%23C6F100" width="20" height="20" align="center" /> Getting Started
 
-1. Download the latest APK from **[Releases](https://github.com/Centurion-Rome/LastWave-Jnr/releases)**.
-2. Install the release APK from the Releases page.
+1. Download the latest APK from **[Releases](https://github.com/Centurion-Rome/LastWave-Jnr/releases)** or the **[Actions](https://github.com/Centurion-Rome/LastWave-Jnr/actions)** tab.
+2. Install `LastWave-Jnr-v4.2.2-release.apk` on your Android device (Android 7.0+).
 3. Connect your Last.fm account to sync your scrobbles, taste profile, and discovery feed.
 4. Start streaming in bit-perfect lossless quality.
 

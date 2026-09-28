@@ -25,6 +25,7 @@ import com.lastwave.app.playback.NativeAudioEngine
 import com.lastwave.app.util.FileExportHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -156,6 +158,12 @@ class SettingsViewModel @Inject constructor(
         .withSettingsFallback("session", SessionData())
         .stateIn(viewModelScope, SettingsSharing, SessionData())
 
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _searchResults = MutableStateFlow<List<MatchResult>>(emptyList())
+    val searchResults: StateFlow<List<MatchResult>> = _searchResults.asStateFlow()
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             session.collect { sess ->
@@ -167,6 +175,22 @@ class SettingsViewModel @Inject constructor(
                     _avatarUrl.value = null
                 }
             }
+        }
+
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch {
+            _searchQuery
+                .debounce(150)
+                .collect { query ->
+                    if (query.isBlank()) {
+                        _searchResults.value = emptyList()
+                    } else {
+                        val results = withContext(Dispatchers.Default) {
+                            FuzzyMatcher.search(query, SettingsSearchIndex.allEntries)
+                        }
+                        _searchResults.value = results
+                    }
+                }
         }
     }
 
@@ -427,6 +451,14 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /** System audio-effects mode (Settings -> Experimental, default OFF):
+     *  flattens in-app DSP on mixer routes and publishes the audio session
+     *  for external equalizer / OEM Dolby processing. Bypass routes suspend
+     *  it automatically in the player; no native call needed here. */
+    fun setSystemEffectsMode(enabled: Boolean) = launchSettingsAction("update system effects mode") {
+        settingsPreferences.setSystemEffectsMode(enabled)
+    }
+
     // ── USB exclusive output (direct DAC, default OFF) ──
 
     val usbExclusiveEnabled: StateFlow<Boolean> =
@@ -477,12 +509,24 @@ class SettingsViewModel @Inject constructor(
     fun setWordByWordLyrics(enabled: Boolean) = launchSettingsAction("update word-by-word lyrics") { settingsPreferences.setWordByWordLyrics(enabled) }
     fun setLyricsAnimation(animation: com.lastwave.app.data.local.LyricsAnimation) = launchSettingsAction("update lyrics animation") { settingsPreferences.setLyricsAnimation(animation) }
     fun setLyricsProvider(provider: com.lastwave.app.data.local.LyricsProvider) = launchSettingsAction("update lyrics provider") { settingsPreferences.setLyricsProvider(provider) }
+    fun setLyricsOffsetMs(offsetMs: Long) = launchSettingsAction("update lyrics sync offset") {
+        settingsPreferences.setLyricsOffsetMs(offsetMs.coerceIn(-3000L, 3000L))
+    }
     fun setCrossfadeEnabled(enabled: Boolean) = launchSettingsAction("update crossfade") { settingsPreferences.setCrossfadeEnabled(enabled) }
     fun setCrossfadeSeconds(seconds: Int) = launchSettingsAction("update crossfade duration") {
         settingsPreferences.setCrossfadeSeconds(seconds.coerceIn(1, 12))
     }
     fun setWavySeekbarEnabled(enabled: Boolean) = launchSettingsAction("update seekbar style") {
         settingsPreferences.setWavySeekbarEnabled(enabled)
+    }
+    fun setCanvasEnabled(enabled: Boolean) = launchSettingsAction("update canvas enabled setting") {
+        settingsPreferences.setCanvasEnabled(enabled)
+    }
+    fun setCanvasFullBleed(enabled: Boolean) = launchSettingsAction("update canvas full-bleed setting") {
+        settingsPreferences.setCanvasFullBleed(enabled)
+    }
+    fun setCanvasOverCellular(enabled: Boolean) = launchSettingsAction("update canvas cellular setting") {
+        settingsPreferences.setCanvasOverCellular(enabled)
     }
     fun setDownloadLyrics(enabled: Boolean) = launchSettingsAction("update download lyrics setting") {
         settingsPreferences.setDownloadLyrics(enabled)
@@ -708,10 +752,11 @@ class SettingsViewModel @Inject constructor(
     // ── Diagnostics ──
 
     /** Builds a troubleshooting report (app/device info, notification-listener
-     *  grant, widget snapshot + placed-widget count, and this process's own
-     *  logcat — readable without any permission) and opens the system share
-     *  sheet for it via the existing FileProvider export path. Runs off the
-     *  main thread; failures surface as a toast through [launchSettingsAction]. */
+     *  grant, widget snapshot + placed-widget count, persisted crash-guard
+     *  log, and this process's own logcat — readable without any permission)
+     *  and opens the system share sheet for it via the existing FileProvider
+     *  export path. Runs off the main thread; failures surface as a toast
+     *  through [launchSettingsAction]. */
     fun exportDiagnostics() {
         launchSettingsAction("export diagnostics") {
             val report = withContext(Dispatchers.IO) { buildDiagnosticsReport() }
@@ -737,11 +782,6 @@ class SettingsViewModel @Inject constructor(
         }.getOrNull() ?: "unknown"
         sb.appendLine("app=${context.packageName} version=$versionName ($versionCode)")
         sb.appendLine("device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} sdk=${android.os.Build.VERSION.SDK_INT}")
-        val hasNotificationAccess = runCatching {
-            androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(context)
-                .contains(context.packageName)
-        }.getOrDefault(false)
-        sb.appendLine("notificationListenerAccess=$hasNotificationAccess")
         val snapshot = runCatching { com.lastwave.app.widget.NowPlayingWidgetSnapshot.read(context) }.getOrNull()
         if (snapshot == null) {
             sb.appendLine("widgetSnapshot=<unreadable>")
@@ -753,10 +793,16 @@ class SettingsViewModel @Inject constructor(
             sb.appendLine("  artPath=${snapshot.artPath} artExists=$artExists")
         }
         val placedWidgets = runCatching {
-            androidx.glance.appwidget.GlanceAppWidgetManager(context)
-                .getGlanceIds(com.lastwave.app.widget.NowPlayingWidget::class.java).size
+            val manager = android.appwidget.AppWidgetManager.getInstance(context)
+            manager.getAppWidgetIds(
+                android.content.ComponentName(context, com.lastwave.app.widget.NowPlayingWidgetReceiver::class.java),
+            ).size
         }.getOrNull()
-        sb.appendLine("placedGlanceWidgets=${placedWidgets ?: "<lookup failed>"}")
+        sb.appendLine("placedWidgets=${placedWidgets ?: "<lookup failed>"}")
+        sb.appendLine("---- crash guard log (persisted across restarts) ----")
+        sb.appendLine(readCrashGuardLog())
+        sb.appendLine("---- startup trail (how far the last launches got) ----")
+        sb.appendLine(runCatching { com.lastwave.app.StartupTrail.readTail(context) }.getOrDefault("(startup trail unavailable)"))
         sb.appendLine("---- logcat (this process) ----")
         sb.append(readOwnLogcat())
         sb.appendLine("---- end ----")
@@ -785,9 +831,21 @@ class SettingsViewModel @Inject constructor(
         lines.joinToString("\n").ifBlank { "(empty log buffer)" }
     }.getOrElse { "(logcat unavailable: ${it.message})" }
 
+    /** Tail of the persisted fatal-exception log. Logcat dies with the
+     *  crashed process, so a post-restart export would otherwise never show
+     *  the actual stack. Never throws. */
+    private fun readCrashGuardLog(): String = runCatching {
+        val file = java.io.File(context.applicationInfo.dataDir, "lastwave_crash_guard.log")
+        if (!file.exists()) return "(no recorded crashes)"
+        file.readLines(Charsets.UTF_8)
+            .takeLast(CRASH_LOG_MAX_LINES)
+            .joinToString("\n").ifBlank { "(empty crash log)" }
+    }.getOrElse { "(crash log unreadable: ${it.message})" }
+
     private companion object {
         const val LOGCAT_MAX_LINES = 3000
         const val LOGCAT_TIMEOUT_SEC = 8L
+        const val CRASH_LOG_MAX_LINES = 120
     }
 
     // ── Scrobbler ──
@@ -945,5 +1003,13 @@ class SettingsViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    fun onSearchQueryChange(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun clearSearch() {
+        _searchQuery.value = ""
     }
 }

@@ -1,17 +1,37 @@
 # Changelog
 
-## [4.2.2] - 2026-09-26
+## [4.2.2] - 2026-09-27
+
+### Added
+- **System Audio Effects mode (Experimental, default OFF):** publishes the audio session for external equalizer apps and OEM Dolby, flattens in-app DSP airtight on mixer routes, auto-suspends on bit-perfect / USB exclusive.
+- **Diagnostics capture:** crash-guard log and startup trail included in the diagnostics export; startup stage breadcrumbs for instant-kill diagnosis.
+- **Settings search (fuzzy):** `FuzzyMatcher` + `SettingsSearchIndex` index every setting for quick navigation.
+- **Animated album canvas:** Apple Music, Tidal and community canvas motion artwork in the player.
+- **Resizable lyrics** and a lyrics sync-offset dialog.
+- **Obsidian glass widget:** single adaptive now-playing widget rebuilt on classic `RemoteViews`.
 
 ### Changed
-- **Merged upstream 4.2.1:** Pulled in `Clash-Projects/LastWave-Native` v4.2.1 — true bit-perfect USB audio pipeline, dual-crystal UAC2 clock switching with smart sample-rate fallback, fluid artwork background, Large Now Playing widget, addon system with native request signing, and five new lyrics providers with TTML syllable parsing.
-- **Analog VU Meter:** Backlight gradient flipped to a vintage lamp-lit face — deep amber at the top of the dial washing out to pale yellow at the bottom, with the shading overlay moved to the top so the bright lower half stays luminous.
+- **Merged upstream 4.2.1:** Pulled in `Clash-Projects/LastWave-Native` v4.2.1 - true bit-perfect USB audio pipeline, dual-crystal UAC2 clock switching with smart sample-rate fallback, fluid artwork background, Large Now Playing widget, addon system with native request signing, and five new lyrics providers with TTML syllable parsing.
+- **Analog VU Meter:** Backlight gradient flipped to a vintage lamp-lit face - deep amber at the top of the dial washing out to pale yellow at the bottom, with the shading overlay moved to the top so the bright lower half stays luminous.
+- **Settings organization:** Equalizer and Studio Clarity moved to Audio → Output & Loudness, liquid glass to Appearance, Experimental reindexed.
+- **External scrobbler removed:** the `MediaScrobbleListenerService` and its settings screens were dropped upstream. Last.fm still drives taste profile and discovery.
+- **Lyrics providers:** dropped the dead LyricsPlus provider; BiniLyrics/Musixmatch hardened with a karaoke line splitter and smarter matching.
 
 ### Fixed
 - **Playlist drag reorder:** Upstream renamed the track key list to `displayKeys` (now aligned to display order), which broke the fork's key-based reorder lookup and broke the build. Drag now keeps the key-based lookup *and* upstream's `runCatching` guards around `layoutInfo` reads at the viewport edge.
+- **Playlist duplication races:** serialized add/remove, auto-suffix same-title siblings, monotonic ids.
+- **Atmos honesty:** JOC-only capability check plus spatial-manifest veto with step-down cascade to stereo / Opus. Atmos downloads fall back down; stereo tiers never upscale to Dolby.
+- **Hi-res reporting:** sample-rate driven 24-bit depth inference across resolve, quality pill, signal path, and track details.
+- **Lyrics readability:** lyrics-tab blur boost plus readability veil; adaptive transport row no longer clips Next on small screens.
+- **Transient playback errors:** the player holds instead of auto-skipping on 403/throttle, and tail-pinned tracks advance.
+- **YouTube login:** no longer reports a false rejected session on slow devices.
+- **Lossless matching:** prefers 24-bit masters instead of parking at 16-bit.
+- **Build:** missing YouTubeMusicTrack import, composable-safe backdrop guard, public DSP constants, restored native library build.
 
 ### Notes
 - Upstream removed the `USB_DEVICE_ATTACHED` intent-filter from the main activity, so the app no longer auto-claims a USB DAC on plug-in.
 - The dead native key getters were removed upstream (`NativeSecrets.baseUrl`/`apiKey`, `NativeModuleKey`, `ModuleCrypto.appKeyId`). Builds now need `ADDON_CLIENT_SECRET` supplied by CI, and encrypted `.lwp` module configs are rejected.
+- Upstream's Playwright/browser-driven stream racing and the animated canvas land here; the `LargeNowPlayingWidget` was superseded by the single adaptive obsidian widget.
 
 ## [4.2.1] - 2026-09-26
 
