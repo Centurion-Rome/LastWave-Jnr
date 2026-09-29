@@ -1,5 +1,60 @@
 # Changelog
 
+## [4.2.4] - 2026-09-29
+
+Second upstream sync from `Clash-Projects/LastWave-Native`, merging 14 commits
+(`21edf34`..`a0d60e1`) on top of the Jnr fork's 352 local commits.
+
+### Added
+- **Widget redesign:** the now-playing widget was restyled to match the reference
+  design while preserving existing functionality (upstream 496b60c).
+- **Liked-songs healing sync:** stronger song identity, a locked YouTube-liked
+  merge, and self-healing sync so liked tracks no longer drift out of the library
+  (upstream e19fe40).
+- **Full-bleed cover melt:** a seamless cover transition in the player with a
+  square-capped hero (upstream 22042f4).
+- **Settings search cleanup:** the scrobbler entries were removed from search and
+  the search index now covers themes (upstream d87e652, 1bde560).
+
+### Changed
+- **Stream format is now locked** for the duration of a track, and **mid-track
+  hot-swap was removed** (upstream 2ad7ec1). This is a deliberate reversal of the
+  background lossless hot-swap introduced in 4.2.3 — see "Notes" below.
+- **Spatial-to-stereo fallback** now cascades, so lossless playback degrades
+  gracefully instead of failing, with a tighter end-of-queue resume guard
+  (upstream 3ea8a70).
+- **Downloads reuse the playback YouTube resolve path** with a broad search, so
+  songs that are playable can actually be downloaded (upstream a0d60e1).
+- **YouTube and lossless playback** resolve in parallel, starting with no delay
+  (upstream 21edf34, carried from 4.2.3).
+
+### Fixed
+- **Number regex in the download manager** no longer breaks DASH `$Number$`
+  segment addressing (upstream 2ad7ec1).
+- Build fixes across `NavGraph`, imports, and `ScrobbleDebugLog` removal
+  (upstream 391762e, 41837f5, f4ae961, d87e652).
+
+### Removed
+- **Mid-track hot-swap** and the leftover app queries / scrobbler debug log, the
+  latter to reduce Play Protect warnings (upstream 2ad7ec1, 4e1bd34).
+- `ScrobbleDebugLog.kt` (upstream 41837f5).
+
+### Notes
+- **Conflict resolutions favour the fork.** Four conflicts were resolved to the
+  local `main` side: the `TrackDownloadManager` DASH `$Number$` regex comment, the
+  `PlayerHost` create-playlist button styling, and both `PlaylistDetailScreen`
+  hunks (the "locate currently playing" button and the track-index width).
+- **Playback needs a real test pass.** `2ad7ec1` reverses the hot-swap design that
+  4.2.3's racing work was built on, and it auto-merged into `MusicPlayer.kt`
+  without conflict — so git raised no warning despite the ~260-line semantic
+  change. This is the highest-risk area of the release.
+- **`reference zip/` was excluded.** Upstream commit `496b60c` accidentally
+  committed an extracted copy of the entire project (145 files, ~16.4k lines).
+  That path was not imported, and the `reference screenshot` image the same
+  commit deleted was restored.
+- **Play Protect:** 4.2.3 told users to remove and re-add the widget. Since the
+  widget was redesigned again here, expect the same one-time re-add.
+
 ## [4.2.3] - 2026-09-28
 
 A large sync with upstream `Clash-Projects/LastWave-Native` (36 commits, `21edf34`),
