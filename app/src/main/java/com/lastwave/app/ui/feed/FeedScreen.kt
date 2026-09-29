@@ -208,7 +208,9 @@ fun FeedScreen(
                 actions = {
                     HeaderActionIcon(Icons.Filled.Download, "Downloads & Offline Music", onOpenDownloads)
                     HeaderActionIcon(Icons.Filled.Search, "Search", onOpenSearch)
-                    HeaderActionIcon(Icons.Filled.Settings, "Settings", onOpenSettings)
+                    IconButton(onClick = onOpenSettings) {
+                        com.lastwave.app.ui.home.ProfileAvatar(avatarUrl = null, modifier = Modifier.size(38.dp))
+                    }
                 },
             )
 
@@ -1208,7 +1210,7 @@ private fun QuickTilesGrid(
         contentPadding = PaddingValues(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(tiles, key = { it.playlistId ?: it.localPlaylistId?.toString() ?: it.collection ?: it.title }) { tile ->
+        items(tiles, key = { "${it.title}_${it.collection ?: ""}_${it.playlistId ?: ""}_${it.localPlaylistId ?: ""}" }) { tile ->
             QuickTileCard(
                 tile = tile,
                 onClick = { onTileClick(tile) },
