@@ -1,5 +1,64 @@
 # Changelog
 
+## [4.2.5] - 2026-10-01
+
+Third upstream sync from `Clash-Projects/LastWave-Native`, merging 10 commits
+(`a0d60e1`..`12492ba`) on top of the Jnr fork. Merge base was `a0d60e1` — no
+history rewrite this time, so no graft workaround was needed and all seven
+overlapping files auto-merged.
+
+### Added
+- **Resizable lyrics font scale** with live controls and persistence (upstream
+  bb0b246). Includes a new `LyricsSizeDialog` and a `FastBlur` fast-path.
+- **Option to disable the rotating background** in the player (upstream f77be2a).
+
+### Fixed
+- **The quality pill no longer fabricates bit depth** (upstream 92c76ad, c3f42d2).
+  Two causes: the decoder's *output* width (`pcmEncoding`, only ever
+  `ENCODING_PCM_16BIT` or `ENCODING_PCM_FLOAT` in the bundled media3-ffmpeg
+  1.2.1) was written into `MusicPlayerState.bitDepth`, so every 24-bit track
+  measured 16 once the sink configured; and the fallback guessed depth from
+  bitrate, which relabelled ordinary 24-bit FLAC as 16. An unknown depth is now
+  shown as unknown, all sources default to null instead of 16, and one shared
+  `resolveDepthForDisplay` rule drives the pill, the detailed badge, the track
+  details sheet and the Signal Path row so they cannot disagree. A reported 16
+  beside a hi-res rate is corrected to 24.
+- **Player crash from the artwork bottom fade** — the Compose `BlendMode.DstIn`
+  rect plus the `createBlendModeEffect` on the motion-artwork `TextureView`
+  underflowed the canvas save stack ("Underflow in restore") and killed the
+  process. Both masks are gone; the fade is a single source-over pass at every
+  API level, and `FadingBottomFrame` hands the save stack back via
+  `restoreToCount` when a driver refuses the layer (upstream 6fd20cd).
+- **Queue state on `playNext` / `addToQueue`** — the queue is now synchronized,
+  the next track is preloaded, and session state is handled rather than dropped
+  (upstream 9123c0d).
+- **Downloads hardened across all tiers** — cooldown skip, Atmos stereo
+  fallback, DASH truncation now fails loudly, YouTube budget capping, and honest
+  completion reporting (upstream ec11a43).
+- **YouTube sync no longer pushes unadded songs** into user playlists
+  (upstream 43a78f5).
+- **Clearing data now stops playback and removes downloads**, instead of leaving
+  a playing queue and orphaned files (upstream 12492ba).
+- **Launcher and splash icon foreground** is scaled into the 66dp circular safe
+  zone so it no longer clips on circular launchers or during the Android 12+
+  splash animation; fourth waveform bar thickness normalized (upstream d29835e).
+
+### Notes
+- **Conflict surface was nil.** All seven overlapping files
+  (`TrackDownloadManager`, `SettingsPreferences`, `SegmentedDashBridge`,
+  `MusicPlayer`, `PlayerHost`, `SettingsScreen`, `strings.xml`) auto-merged, and
+  the fork's own YT download resolve path from `a0d60e1` came through intact.
+- **Quality badge needs a device pass.** The bit-depth fix touches both
+  `MusicPlayerState.bitDepth` writers and lands alongside the 4.2.4
+  stream-lock change, which auto-merged into the same ~300 lines of
+  `MusicPlayer.kt` without conflict. `d29835e` also had to fix an
+  uncompilable `resolvedBitDepth.takeIf { it > 0 }` on an `Int?` left by
+  `c3f42d2`, so this area was churning across three commits.
+- **`resolveDepthForDisplay` corrects 16 to 24 above 48kHz.** That is a
+  deliberate inference, not a measurement — genuine 16-bit content at 88.2kHz+
+  will display as 24-bit.
+- `origin/feat/export-diagnostics` was deleted on the remote during the fetch.
+
 ## [4.2.4] - 2026-09-29
 
 Second upstream sync from `Clash-Projects/LastWave-Native`, merging 14 commits
