@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -124,10 +125,10 @@ data class MiscSettings(
      *  AUTO races all providers (fastest valid word-sync wins); an explicit
      *  pick is tried first with the rest as fallback. */
     val lyricsProvider: LyricsProvider = LyricsProvider.AUTO,
-    /** Manual sync offset applied to lyric focus/highlight only (ms).
-     *  Positive shifts lyrics later (highlights lag the audio less when the
-     *  provider timestamps run early). Clamped to ±3s. */
     val lyricsOffsetMs: Long = 0L,
+    /** Scale factor applied to lyrics font size across both modern and classic views.
+     *  Default 1.0f (100%), clamped between 0.7f (70%) and 1.5f (150%). */
+    val lyricsFontScale: Float = 1.0f,
     /** Blend the end of one queued track into the beginning of the next. */
     val crossfadeEnabled: Boolean = false,
     /** Crossfade length in seconds; kept within the native settings slider range. */
@@ -135,6 +136,9 @@ data class MiscSettings(
     /** When true (default), uses the multi-layer dynamic wavy seekbar.
      *  When false, uses the classic standard progress slider in the player tab. */
     val wavySeekbarEnabled: Boolean = true,
+    /** When true (default), animates fluid rotating artwork in the player and lyrics background.
+     *  When false, uses a calm static blurred artwork background (especially recommended for Android 11 and below). */
+    val rotatingBackgroundEnabled: Boolean = true,
     /** When true (default), downloads fetch and save synced lyrics (.lrc companion files and embedded tags). */
     val downloadLyrics: Boolean = true,
     /** In-app language override tag: "system" (default), "en", "tr", "zh-Hans". */
@@ -252,9 +256,11 @@ class SettingsPreferences @Inject constructor(
         val LYRICS_ANIMATION = stringPreferencesKey("lw_lyrics_animation")
         val LYRICS_PROVIDER = stringPreferencesKey("lw_lyrics_provider")
         val LYRICS_OFFSET_MS = longPreferencesKey("lw_lyrics_offset_ms")
+        val LYRICS_FONT_SCALE = floatPreferencesKey("lw_lyrics_font_scale")
         val CROSSFADE_ENABLED = booleanPreferencesKey("lw_crossfade_enabled")
         val CROSSFADE_SECONDS = intPreferencesKey("lw_crossfade_seconds")
         val WAVY_SEEKBAR_ENABLED = booleanPreferencesKey("lw_wavy_seekbar_enabled")
+        val ROTATING_BACKGROUND_ENABLED = booleanPreferencesKey("lw_rotating_background_enabled")
         val DOWNLOAD_LYRICS = booleanPreferencesKey("lw_download_lyrics")
         val APP_LANGUAGE = stringPreferencesKey("lw_app_language")
         val DOWNLOAD_FOLDER = stringPreferencesKey("lw_download_folder")
@@ -296,9 +302,11 @@ class SettingsPreferences @Inject constructor(
                 lyricsAnimation = LyricsAnimation.fromId(p.readSafely(Keys.LYRICS_ANIMATION)),
                 lyricsProvider = LyricsProvider.fromId(p.readSafely(Keys.LYRICS_PROVIDER)),
                 lyricsOffsetMs = (p.readSafely(Keys.LYRICS_OFFSET_MS) ?: 0L).coerceIn(-3000L, 3000L),
+                lyricsFontScale = (p.readSafely(Keys.LYRICS_FONT_SCALE) ?: 1.0f).coerceIn(0.7f, 1.5f),
                 crossfadeEnabled = p.readSafely(Keys.CROSSFADE_ENABLED) ?: false,
                 crossfadeSeconds = (p.readSafely(Keys.CROSSFADE_SECONDS) ?: 5).coerceIn(1, 12),
                 wavySeekbarEnabled = p.readSafely(Keys.WAVY_SEEKBAR_ENABLED) ?: true,
+                rotatingBackgroundEnabled = p.readSafely(Keys.ROTATING_BACKGROUND_ENABLED) ?: true,
                 downloadLyrics = p.readSafely(Keys.DOWNLOAD_LYRICS) ?: true,
                 appLanguageTag = AppLanguage.fromTag(p.readSafely(Keys.APP_LANGUAGE)).tag,
                 downloadFolder = sanitizeDownloadFolderName(p.readSafely(Keys.DOWNLOAD_FOLDER)),
@@ -426,6 +434,10 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.LYRICS_OFFSET_MS] = offsetMs.coerceIn(-3000L, 3000L) }
     }
 
+    suspend fun setLyricsFontScale(scale: Float) {
+        dataStore.edit { it[Keys.LYRICS_FONT_SCALE] = scale.coerceIn(0.7f, 1.5f) }
+    }
+
     suspend fun setCrossfadeEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.CROSSFADE_ENABLED] = enabled }
     }
@@ -436,6 +448,10 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setWavySeekbarEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.WAVY_SEEKBAR_ENABLED] = enabled }
+    }
+
+    suspend fun setRotatingBackgroundEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.ROTATING_BACKGROUND_ENABLED] = enabled }
     }
 
     suspend fun setDownloadLyrics(enabled: Boolean) {

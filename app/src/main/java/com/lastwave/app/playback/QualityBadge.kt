@@ -5,9 +5,13 @@ import kotlin.math.roundToInt
 /**
  * Now-playing quality pill text.
  *
- * Lossless is formatted as `$bitDepth/${sampleRate}kHz` (e.g. `24/44.1kHz`,
- * `24/48kHz`, `24/88.2kHz`, `24/96kHz`, `24/176.4kHz`, `24/192kHz`,
- * `16/48kHz`, `16/44.1kHz`, `32/384kHz`).
+ * Describes the SONG, never the decoder's output: the depth comes from the
+ * backend/container metadata only, corrected by the fact that a rate above
+ * 48kHz is 24-bit in practice. Lossless is formatted as
+ * `$bitDepth/${sampleRate}kHz` (e.g. `24/44.1kHz`, `24/48kHz`, `24/88.2kHz`,
+ * `24/96kHz`, `24/176.4kHz`, `24/192kHz`, `16/44.1kHz`, `32/384kHz`).
+ * At or below 48kHz an unknown depth is shown as the rate alone
+ * (`44.1kHz FLAC`) — never a guessed 16 or 24.
  * Spatial mixes use a short `ATMOS` or `SPATIAL` badge.
  */
 fun qualityBadgeLabel(state: MusicPlayerState): String {
@@ -17,23 +21,20 @@ fun qualityBadgeLabel(state: MusicPlayerState): String {
     val codec = state.audioCodec
     val flacLike = isFlacLikeCodec(codec) || state.isLossless
     val rate = state.samplingRateKHz ?: inferSamplingRate(state)
-    val depth = when {
-        rate != null && rate > 192.0 -> 32
-        rate != null && rate > 48.0 -> 24
-        else -> state.bitDepth ?: inferBitDepth(state)
-    }
+    // One shared rule for every surface: the song's depth, corrected only by
+    // the fact that a rate above 48kHz is 24-bit in practice (see
+    // resolveDepthForDisplay). The decoder's PCM encoding is never consulted.
+    val depth = resolveDepthForDisplay(state.bitDepth, rate)
+        ?: inferBitDepth(state.copy(bitDepth = null), allowRateGuess = false)
 
     if (flacLike && depth != null && rate != null && rate > 0.0) {
-        val accurateDepth = if (rate > 192.0) 32 else if (rate > 48.0 && depth <= 16) 24 else depth
-        return "$accurateDepth/${formatSampleRateKHz(rate)}kHz"
+        return "$depth/${formatSampleRateKHz(rate)}kHz"
     }
     if (flacLike && rate != null && rate > 0.0) {
-        val inferredDepth = if (rate > 192.0) 32 else if (rate > 48.0) 24 else 16
-        return "$inferredDepth/${formatSampleRateKHz(rate)}kHz"
+        return "${formatSampleRateKHz(rate)}kHz FLAC"
     }
     if (flacLike && depth != null) {
-        val accurateDepth = if (depth <= 16 && (rate ?: 0.0) > 48.0) 24 else depth
-        return "$accurateDepth-BIT FLAC"
+        return "$depth-BIT FLAC"
     }
     if (flacLike) {
         val parsed = parseQualityFromCodec(codec)
@@ -75,6 +76,38 @@ fun formatSampleRateKHz(kHzOrHz: Double): String {
 }
 
 /**
+ * The bit depth to display for a stream, from the depth the source reported and
+ * its sample rate. Every badge, the details sheet and the Signal Path dialog go
+ * through this so they can never disagree.
+ *
+ * Hi-res means 24-bit in practice. A rate above 48kHz (88.2, 96, 176.4, 192)
+ * is a 24-bit master in effectively every real release — a genuine 16-bit
+ * stream at those rates is vanishingly rare. So a reported 16 beside such a
+ * rate is corrected to 24 rather than shown as 16, and an *unknown* depth at a
+ * hi-res rate resolves to 24 too, because the rate is strong enough evidence
+ * and half a label ("96kHz FLAC") helps nobody. Above 192kHz the hi-res class is
+ * 32-bit, not 24.
+ *
+ * At or below 48kHz nothing is assumed: a reported 16 stays 16 (CD audio is
+ * genuinely 16-bit) and an unknown depth stays unknown, rendering rate-only.
+ *
+ * This is a deliberate domain assumption, not a measurement. It is isolated
+ * here so the assumption is changed in exactly one place.
+ */
+internal fun resolveDepthForDisplay(bitDepth: Int?, rateKHz: Double?): Int? {
+    val reported = bitDepth?.takeIf { it > 0 }
+    val rate = rateKHz ?: 0.0
+    val hiRes = rate > 48.0
+    return when {
+        // A reported depth of its own, unless it is a 16 at a hi-res rate.
+        reported != null && (reported > 16 || !hiRes) -> reported
+        rate > 192.0 -> 32
+        hiRes -> 24
+        else -> null
+    }
+}
+
+/**
  * Standard detailed badge for downloads, track details sheets, and metadata cards.
  * Formats every tier cleanly: e.g. "24-BIT / 96k", "24-BIT / 48k", "24-BIT / 44.1k",
  * "16-BIT / 48k", "16-BIT / 44.1k", "24-BIT / 192k".
@@ -82,44 +115,41 @@ fun formatSampleRateKHz(kHzOrHz: Double): String {
 fun formatDetailedQualityBadge(bitDepth: Int?, sampleRateKHzOrHz: Double?, isAtmos: Boolean = false): String {
     if (isAtmos) return "DOLBY ATMOS"
     val rateKHz = if ((sampleRateKHzOrHz ?: 0.0) > 1000.0) (sampleRateKHzOrHz ?: 0.0) / 1000.0 else (sampleRateKHzOrHz ?: 0.0)
-    val depth = if (rateKHz > 192.0) 32 else if (rateKHz > 48.0) 24 else if ((bitDepth ?: 0) > 0) bitDepth!! else 16
-    return if (rateKHz > 0.0) {
-        "$depth-BIT / ${formatSampleRateKHz(rateKHz)}k"
-    } else if (depth > 16) {
-        "24-BIT FLAC"
-    } else {
-        "CD LOSSLESS"
+    val depth = resolveDepthForDisplay(bitDepth, rateKHz)
+    return when {
+        depth != null && rateKHz > 0.0 -> "$depth-BIT / ${formatSampleRateKHz(rateKHz)}k"
+        rateKHz > 0.0 -> "${formatSampleRateKHz(rateKHz)}k FLAC"
+        depth != null -> "$depth-BIT FLAC"
+        else -> "FLAC"
     }
 }
 
-internal fun inferBitDepth(state: MusicPlayerState): Int? {
-    val rate = state.samplingRateKHz
-    // All commercial Hi-Res releases above 48kHz (88.2, 96, 176.4, 192, 352.8, 384) are 24-bit or 32-bit.
-    if (rate != null && rate > 48.0) {
-        return if (rate > 192.0) 32 else 24
-    }
-
+internal fun inferBitDepth(state: MusicPlayerState, allowRateGuess: Boolean = true): Int? {
     val codec = state.audioCodec?.uppercase().orEmpty()
     if (codec.contains("32-BIT") || codec.contains("32BIT") || codec.contains("32/")) return 32
-    if (codec.contains("24-BIT") || codec.contains("24BIT") || codec.contains("HI-RES") || codec.contains("HI_RES") || codec.contains("24/")) return 24
+    // NOTE: "HI-RES" alone never implies 24-bit (it describes the rate, and
+    // our own rate-derived "HI-RES FLAC" labels would loop back into a
+    // fabricated 24). Only explicit depth claims count here.
+    if (codec.contains("24-BIT") || codec.contains("24BIT") || codec.contains("24/")) return 24
     if (codec.contains("16-BIT") || codec.contains("16BIT") || codec.contains("CD") || codec.contains("16/")) return 16
 
     val explicit = state.bitDepth?.takeIf { it > 0 }
     if (explicit != null) return explicit
 
-    val kbps = state.bitrateKbps ?: return null
-    if (rate != null && rate > 0.0 && kbps > 0) {
-        val inferred = (kbps * 1000.0 / (rate * 1000.0 * 2.0)).roundToInt()
-        when (inferred) {
-            in 15..17 -> return 16
-            in 23..25 -> return 24
-            in 31..33 -> return 32
-        }
-        // Compressed FLAC heuristics at 44.1/48kHz:
-        // A stereo 16-bit 44.1/48k FLAC almost never exceeds 1200 kbps.
-        // A stereo 24-bit 44.1/48k FLAC typically sits between 1400 and 2400 kbps.
-        if (kbps >= 1500) return 24
-        if (kbps in 400..1150) return 16
+    // No bit-depth guessing from bitrate. A stereo 24-bit/44.1kHz FLAC lands
+    // anywhere from ~500 to ~2500 kbps depending purely on how well that
+    // recording compresses, so "400..1150 kbps => 16-bit" relabelled ordinary
+    // 24-bit tracks as 16-bit and hid the real format behind a coincidence of
+    // bitrate buckets. An unknown depth must stay unknown; the callers render
+    // rate-only ("44.1kHz FLAC") rather than assert a number we cannot verify.
+    //
+    // The last-resort rate guess below is likewise disallowed where honesty
+    // matters (badges and signal path): a 16-bit/96kHz FLAC is valid, so the
+    // rate alone must never assert a depth.
+    if (!allowRateGuess) return null
+    val rate = state.samplingRateKHz
+    if (rate != null && rate > 48.0) {
+        return if (rate > 192.0) 32 else 24
     }
     return null
 }
@@ -154,11 +184,11 @@ internal fun parseQualityFromCodec(codec: String?): String? {
     if (c.isBlank()) return null
     val match = Regex("""(?:^|[^\d])(16|24|32)\s*(?:[-_]bit)?\s*[/]\s*(\d{2,3}(?:\.\d+)?)\s*k?""", RegexOption.IGNORE_CASE).find(c)
     if (match != null) {
-        var depth = match.groupValues[1].toIntOrNull() ?: 16
+        // Trust an explicit "depth/rate" label verbatim: a parsed 16/96 is
+        // a real (if unusual) combination, never to be "corrected" to 24.
+        val depth = match.groupValues[1].toIntOrNull() ?: 16
         val rate = match.groupValues[2].toDoubleOrNull()
         if (rate != null) {
-            if (rate > 192.0) depth = 32
-            else if (rate > 48.0 && depth <= 16) depth = 24
             return "$depth/${formatSampleRateKHz(rate)}kHz"
         }
     }

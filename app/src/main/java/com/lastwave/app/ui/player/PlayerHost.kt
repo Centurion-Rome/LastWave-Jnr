@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.DisposableEffect
@@ -151,11 +152,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -244,6 +242,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.graphics.scale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -324,6 +323,12 @@ class PlayerViewModel @Inject constructor(
     fun setLyricsOffsetMs(offsetMs: Long) {
         viewModelScope.launch {
             settingsPreferences.setLyricsOffsetMs(offsetMs.coerceIn(-3000L, 3000L))
+        }
+    }
+
+    fun setLyricsFontScale(scale: Float) {
+        viewModelScope.launch {
+            settingsPreferences.setLyricsFontScale(scale)
         }
     }
 
@@ -794,8 +799,11 @@ private fun ExpandedPlayer(
         lyricsUiVersion = settings.lyricsUiVersion,
         lyricsAnimation = settings.lyricsAnimation,
         wavySeekbarEnabled = settings.wavySeekbarEnabled,
+        rotatingBackgroundEnabled = settings.rotatingBackgroundEnabled,
         lyricsOffsetMs = settings.lyricsOffsetMs,
         onSetLyricsOffsetMs = viewModel::setLyricsOffsetMs,
+        lyricsFontScale = settings.lyricsFontScale,
+        onSetLyricsFontScale = viewModel::setLyricsFontScale,
         canvas = canvas,
         canvasEnabled = settings.canvasEnabled,
         canvasFullBleedEnabled = settings.canvasFullBleed,
@@ -1632,8 +1640,11 @@ private fun FullPlayer(
     lyricsUiVersion: LyricsUiVersion = LyricsUiVersion.MODERN,
     lyricsAnimation: LyricsAnimation = LyricsAnimation.APPLE_FLUID,
     wavySeekbarEnabled: Boolean = true,
+    rotatingBackgroundEnabled: Boolean = true,
     lyricsOffsetMs: Long = 0L,
     onSetLyricsOffsetMs: ((Long) -> Unit)? = null,
+    lyricsFontScale: Float = 1.0f,
+    onSetLyricsFontScale: ((Float) -> Unit)? = null,
     canvas: com.lastwave.app.data.canvas.CanvasArtwork? = null,
     canvasEnabled: Boolean = true,
     canvasFullBleedEnabled: Boolean = true,
@@ -1806,7 +1817,20 @@ private fun FullPlayer(
                     // Lyrics legibility lives or dies on background
                     // suppression; the Now Playing tab keeps its light blur.
                     extraBlur = currentTab == FullPlayerTab.LYRICS,
+                    rotatingBackgroundEnabled = rotatingBackgroundEnabled,
                     fallback = {
+                        val staticBlurTransform = remember(currentTab) {
+                            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                                listOf(
+                                    BlurTransformation(
+                                        radius = if (currentTab == FullPlayerTab.LYRICS) 25 else 18,
+                                        maxDimension = 100,
+                                    )
+                                )
+                            } else {
+                                emptyList()
+                            }
+                        }
                         PlayerArtwork(
                             track = track,
                             modifier = Modifier
@@ -1817,14 +1841,19 @@ private fun FullPlayer(
                                     alpha = 0.9f
                                 }
                                 .then(
-                                    if (currentTab == FullPlayerTab.LYRICS) {
-                                        Modifier.blur(36.dp)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                        if (currentTab == FullPlayerTab.LYRICS) {
+                                            Modifier.blur(36.dp)
+                                        } else {
+                                            Modifier.blur(20.dp)
+                                        }
                                     } else {
                                         Modifier
                                     }
                                 ),
                             corner = 0.dp,
                             decodeSizePx = 200,
+                            transformations = staticBlurTransform,
                         )
                         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.52f)))
                         Box(
@@ -1929,8 +1958,9 @@ private fun FullPlayer(
                     val heroPx = measuredPx.coerceIn(minPx, maxPx).coerceAtLeast(1f)
                     val heroHeight = with(density) { heroPx.toDp() }
                     // Melt foundation UNDER the hero: transparent where hero is opaque,
-                    // fully solid where hero has faded out. Revealed through the DstIn
-                    // mask, so there is never a hero-edge line — just hue into hue.
+                    // fully solid where hero has faded out. The hero's bottom overlay
+                    // fades toward exactly this colour, so there is never a hero-edge
+                    // line — just hue into hue.
                     Box(
                         Modifier
                             .fillMaxSize()
@@ -1959,27 +1989,13 @@ private fun FullPlayer(
                             .align(Alignment.TopStart)
                             .fillMaxWidth()
                             .height(heroHeight)
-                            .graphicsLayer {
-                                compositingStrategy = CompositingStrategy.Offscreen
-                            }
-                            .drawWithContent {
-                                drawContent()
-                                // Long buttery fade: fully sharp through the face/focus
-                                // zone, then eased melt. Extra stops kill banding so the
-                                // join is hard to notice even on flat skin tones.
-                                drawRect(
-                                    brush = Brush.verticalGradient(
-                                        0.00f to Color.Black,
-                                        0.52f to Color.Black,
-                                        0.66f to Color.Black.copy(alpha = 0.92f),
-                                        0.78f to Color.Black.copy(alpha = 0.66f),
-                                        0.88f to Color.Black.copy(alpha = 0.30f),
-                                        0.95f to Color.Black.copy(alpha = 0.08f),
-                                        1.00f to Color.Transparent,
-                                    ),
-                                    blendMode = BlendMode.DstIn,
-                                )
-                            }
+                            // No offscreen compositing strategy here on purpose. The melt
+                            // used to be a BlendMode.DstIn drawWithContent mask on an
+                            // Offscreen graphicsLayer, which wrapped the motion artwork
+                            // TextureView in two nested saveLayers and underflowed the
+                            // canvas save stack ("Underflow in restore - more restores
+                            // than saves") on some GPUs. The identical image is now a
+                            // plain source-over pass at the bottom of this Box.
                             .then(
                                 if (lyricsCanvasBlurDp > 0.dp) {
                                     Modifier.blur(lyricsCanvasBlurDp)
@@ -2018,6 +2034,7 @@ private fun FullPlayer(
                                 // Lower than before: outer hero mask + bottom tint now own
                                 // the melt. Higher values double-darken animated art.
                                 bottomFade = 0.30f,
+                                bottomFadeFallbackColor = seamlessBase.toArgb(),
                                 onAspectRatioChanged = { canvasAspect = it },
                                 onRenderedChanged = { canvasRendered = it },
                                 pausedForTransition = shownDismissY > 0f || currentTab != FullPlayerTab.NOW_PLAYING,
@@ -2028,20 +2045,26 @@ private fun FullPlayer(
                                     },
                             )
                         }
-                        // Bottom hue-tint INSIDE the mask: dyes the hero's own tail
-                        // pixels toward seamlessBase before they fade, so sharp art
-                        // and solid meet with zero visible edge. Also fades with DstIn.
+                        // Melt + hue-tint in ONE source-over pass, replacing the old
+                        // BlendMode.DstIn mask. Alpha here is 1 - (old mask alpha) at the
+                        // exact same stop positions, painted toward the same seamlessBase
+                        // the artwork used to be erased into, so the rendered pixels are
+                        // unchanged — minus the offscreen RenderNode and saveLayer that
+                        // used to sit around the motion artwork TextureView.
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
-                                .height(heroHeight * 0.58f)
+                                .height(heroHeight)
                                 .background(
                                     Brush.verticalGradient(
                                         0.00f to Color.Transparent,
-                                        0.45f to seamlessBase.copy(alpha = 0.18f),
-                                        0.75f to seamlessBase.copy(alpha = 0.42f),
-                                        1.00f to seamlessBase.copy(alpha = 0.62f),
+                                        0.52f to Color.Transparent,
+                                        0.66f to seamlessBase.copy(alpha = 0.08f),
+                                        0.78f to seamlessBase.copy(alpha = 0.34f),
+                                        0.88f to seamlessBase.copy(alpha = 0.70f),
+                                        0.95f to seamlessBase.copy(alpha = 0.92f),
+                                        1.00f to seamlessBase,
                                     )
                                 )
                         )
@@ -2201,6 +2224,8 @@ private fun FullPlayer(
                                         progressState = progressState,
                                         wavySeekbarEnabled = wavySeekbarEnabled,
                                         lyricsOffsetMs = lyricsOffsetMs,
+                                        lyricsFontScale = lyricsFontScale,
+                                        onLyricsFontScaleChange = onSetLyricsFontScale ?: {},
                                         onRetry = onRetryLyrics,
                                         onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
                                         isFullscreen = lyricsFullscreen,
@@ -2221,6 +2246,8 @@ private fun FullPlayer(
                                         lyricsAnimation = lyricsAnimation,
                                         wavySeekbarEnabled = wavySeekbarEnabled,
                                         lyricsOffsetMs = lyricsOffsetMs,
+                                        lyricsFontScale = lyricsFontScale,
+                                        onLyricsFontScaleChange = onSetLyricsFontScale ?: {},
                                         onRetry = onRetryLyrics,
                                         onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
                                         isFullscreen = lyricsFullscreen,
@@ -3737,6 +3764,7 @@ private fun PlayerArtwork(
     canvas: com.lastwave.app.data.canvas.CanvasArtwork? = null,
     isPlaying: Boolean = false,
     pausedForTransition: Boolean = false,
+    transformations: List<coil.transform.Transformation> = emptyList(),
     onAspectRatioChanged: (Float) -> Unit = {},
 ) {
     Box(modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
@@ -3747,6 +3775,7 @@ private fun PlayerArtwork(
             fallbackIcon = Icons.Filled.MusicNote,
             modifier = Modifier.fillMaxSize(),
             decodeSizePx = decodeSizePx,
+            transformations = transformations,
         )
         if (canvas != null) {
             CanvasArtworkPlayer(

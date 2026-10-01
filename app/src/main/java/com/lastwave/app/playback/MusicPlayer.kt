@@ -441,6 +441,37 @@ class MusicPlayer @Inject constructor(
     val usbDacState: StateFlow<UsbDacMonitor.State> = usbDacMonitor.state
     private val resolvingMediaIds = ConcurrentHashMap<String, Long>()
     private val preparedStreams = ConcurrentHashMap<String, ResolvedStream>()
+
+    /**
+     * Stream resolved for a track we are about to hand over to ExoPlayer, plus
+     * the mediaId it belongs to.
+     *
+     * [takeOverPlayback] calls `seekToDefaultPosition`, which fires
+     * [onMediaItemTransition]; that callback resets the quality fields so the
+     * pill can never show the previous song's format. With the decoder no longer
+     * permitted to write depth, that reset was the last chance to wipe a
+     * perfectly good resolved depth, and the republish that used to run
+     * afterwards only fired when `preparedStreams[customCacheKey]` happened to
+     * resolve. Stashing the stream here lets the transition reset hand the
+     * depth straight back, so the pill is correct from the first frame
+     * regardless of cache-key bookkeeping.
+     */
+    private var pendingQualityMediaId: String? = null
+    private var pendingQualityStream: ResolvedStream? = null
+
+    private fun stagePendingQuality(mediaId: String, stream: ResolvedStream) {
+        pendingQualityMediaId = mediaId
+        pendingQualityStream = stream
+    }
+
+    /** Stashed stream for [mediaId], clearing the stash so it is used once. */
+    private fun consumePendingQuality(mediaId: String): ResolvedStream? {
+        val staged = pendingQualityStream?.takeIf { pendingQualityMediaId == mediaId }
+        pendingQualityMediaId = null
+        pendingQualityStream = null
+        return staged
+    }
+
     /**
      * Known track durations (ms) keyed by MediaItem customCacheKey and by
      * mediaId/videoId. ExoPlayer reports TIME_UNSET until it has parsed
@@ -599,6 +630,9 @@ class MusicPlayer @Inject constructor(
                 val currentIndex = player.currentMediaItemIndex
                 val currentTrack = mediaItem.toPlayableTrack()
                 val currentQueue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).toPlayableTrack() }
+                // The stream we staged for this exact mediaId, if any. Taken
+                // before the reset so the badge survives it.
+                val stagedQuality = consumePendingQuality(mediaItem.mediaId)
                 _state.update {
                     it.copy(
                         current = currentTrack,
@@ -610,7 +644,9 @@ class MusicPlayer @Inject constructor(
                         isBuffering = true,
                         error = null,
                         // New item owns its badge (same reason as the
-                        // resolveAndPlayQueueItem reset above).
+                        // resolveAndPlayQueueItem reset above). Only the
+                        // resolved stream can restore it: the decoder is no
+                        // longer allowed to invent a depth.
                         audioCodec = null,
                         bitrateKbps = null,
                         isLossless = false,
@@ -619,9 +655,9 @@ class MusicPlayer @Inject constructor(
                     )
                 }
                 decodedSampleRateHz = 0
-                mediaItem.localConfiguration
+                (stagedQuality ?: mediaItem.localConfiguration
                     ?.customCacheKey
-                    ?.let(preparedStreams::get)
+                    ?.let(preparedStreams::get))
                     ?.let { stream ->
                         publishResolvedQuality(stream)
                         applyDacRoutingFor(dacRateFor(stream), stream.audioCodec)
@@ -962,19 +998,31 @@ class MusicPlayer @Inject constructor(
                     // to the next track (44.1 PCM written into a 96 kHz alt).
                     exclusiveUsb = if (handleAudioFocus) exclusiveUsbOutput else null,
                 ).also { sink ->
-                    sink.onConfiguredFormat = { rateHz, encoding, _ ->
-                        onDecodedPcmFormatConfigured(rateHz, encoding)
+                    sink.onConfiguredFormat = { rateHz, _, _ ->
+                        onDecodedPcmFormatConfigured(rateHz)
                     }
                     sink.bitDepthHintProvider = {
                         val s = _state.value
-                        val rate = s.samplingRateKHz ?: (if (decodedSampleRateHz > 0) decodedSampleRateHz / 1000.0 else 0.0)
-                        when {
-                            rate > 192.0 -> 32
-                            rate > 48.0 -> 24
-                            else -> parseQualityFromCodec(s.audioCodec)?.substringBefore('/')?.toIntOrNull()
-                                ?: s.bitDepth
-                                ?: inferBitDepth(s)
-                        }
+                        val hintRate = s.samplingRateKHz
+                            ?: (if (decodedSampleRateHz > 0) decodedSampleRateHz / 1000.0 else 0.0)
+                        // Output sizing biases UP safely: an unknown depth must not size a
+                        // 16-bit output that would truncate a true 24-bit source,
+                        // so only a genuinely reported depth is used as-is and
+                        // everything else falls through to the up-biasing
+                        // rate guess. A reported 16 is trusted even at >48kHz —
+                        // 16/96 and 16/192 are real, and the sources no longer
+                        // send a placeholder 16.
+                        val hintKnown = s.bitDepth?.takeIf { it > 0 }
+                        parseQualityFromCodec(s.audioCodec)?.substringBefore('/')?.toIntOrNull()
+                            ?: hintKnown
+                            ?: inferBitDepth(s.copy(bitDepth = hintKnown))
+                            ?: run {
+                                when {
+                                    hintRate > 192.0 -> 32
+                                    hintRate > 48.0 -> 24
+                                    else -> null
+                                }
+                            }
                     }
                     val isSpatial = isSpatialAudioCodec(_state.value.audioCodec)
                     sink.setBitPerfectRequested(!isSpatial && (bitPerfectEnabled || usbExclusivePrefEnabled))
@@ -1088,14 +1136,6 @@ class MusicPlayer @Inject constructor(
                             else -> null
                         }
                         val bitrate = format.bitrate.takeIf { it > 0 }?.let { (it + 500) / 1000 }
-                        val depth = when (format.pcmEncoding) {
-                            C.ENCODING_PCM_8BIT -> 8
-                            C.ENCODING_PCM_16BIT -> 16
-                            C.ENCODING_PCM_24BIT -> 24
-                            C.ENCODING_PCM_32BIT -> 32
-                            // Note: C.ENCODING_PCM_FLOAT is internal decoder float representation, NOT source bit depth
-                            else -> null
-                        }
                         _state.update { snapshot ->
                             var updated = snapshot
                             val isSpatial = isSpatialAudioCodec(detectedCodec) || isSpatialAudioCodec(updated.audioCodec)
@@ -1107,33 +1147,33 @@ class MusicPlayer @Inject constructor(
                                 val kHz = rateHz / 1000.0
                                 if (updated.samplingRateKHz != kHz) updated = updated.copy(samplingRateKHz = kHz)
                             }
-                            val effectiveRateKHz = updated.samplingRateKHz ?: (if (rateHz > 0) rateHz / 1000.0 else null)
-                            val accurateDepth = when {
-                                (rateHz > 192_000 || (effectiveRateKHz ?: 0.0) > 192.0) -> 32
-                                (rateHz > 48_000 || (effectiveRateKHz ?: 0.0) > 48.0) -> 24
-                                depth != null && depth > 16 -> depth
-                                updated.bitDepth != null && updated.bitDepth!! > 16 -> updated.bitDepth
-                                depth != null -> depth
-                                updated.bitDepth != null -> updated.bitDepth
-                                detectedCodec == "FLAC" || isFlacLikeCodec(updated.audioCodec) -> 16
-                                else -> null
-                            }
-                            updated = updated.copy(bitDepth = accurateDepth)
+                            // The pill describes the SONG, not the decoder.
+                            // format.pcmEncoding is the decoder's OUTPUT width: a
+                            // 24-bit FLAC routinely decodes to 16-bit PCM on a
+                            // device whose decoder (or mixer) cannot carry more,
+                            // so reading it here reported the phone's limits as
+                            // the file's depth. Only the source depth already
+                            // resolved by publishResolvedQuality / the local
+                            // retriever is used, through the shared hi-res rule
+                            // (a rate above 48kHz is 24-bit in practice, so a
+                            // reported 16 is corrected there).
+                            val sourceDepth = resolveDepthForDisplay(
+                                updated.bitDepth,
+                                updated.samplingRateKHz ?: (if (rateHz > 0) rateHz / 1000.0 else null),
+                            )
                             if (isSpatialAudioCodec(detectedCodec)) {
                                 updated = updated.copy(audioCodec = detectedCodec, isLossless = false)
                             } else if (!isSpatialAudioCodec(updated.audioCodec) && detectedCodec != null) {
                                 val currentIsExplicit = isExplicitQuality(updated.audioCodec, updated.bitDepth, updated.samplingRateKHz)
                                 val detectedBadge = when {
-                                    detectedCodec == "FLAC" && rateHz > 0 -> {
-                                        val d = accurateDepth ?: (if (rateHz > 48_000) 24 else 16)
-                                        "$d/${formatSampleRateKHz(rateHz / 1000.0)}kHz"
+                                    detectedCodec == "FLAC" && rateHz > 0 && sourceDepth != null -> {
+                                        "$sourceDepth/${formatSampleRateKHz(rateHz / 1000.0)}kHz"
                                     }
                                     detectedCodec == "FLAC" &&
-                                        ((accurateDepth ?: 0) > 16 || rateHz > 48_000) -> "HI-RES FLAC"
+                                        ((sourceDepth ?: 0) > 16 || rateHz > 48_000) -> "HI-RES FLAC"
                                     else -> detectedCodec
                                 }
-                                val isMismatched16BitBadge = updated.audioCodec?.startsWith("16/") == true && (rateHz > 48_000 || (effectiveRateKHz ?: 0.0) > 48.0)
-                                val finalCodec = if (currentIsExplicit && !isMismatched16BitBadge && updated.audioCodec != "FLAC" && updated.audioCodec != "HI-RES FLAC" && updated.audioCodec != "LOSSLESS") {
+                                val finalCodec = if (currentIsExplicit && updated.audioCodec != "FLAC" && updated.audioCodec != "HI-RES FLAC" && updated.audioCodec != "LOSSLESS") {
                                     updated.audioCodec
                                 } else {
                                     detectedBadge
@@ -1144,7 +1184,7 @@ class MusicPlayer @Inject constructor(
                                     isLossless = detectedCodec == "FLAC",
                                 )
                             }
-                            android.util.Log.i("MusicPlayer", "AudioInputFormatChanged: mime=${format.sampleMimeType}, rate=${rateHz}Hz, bitrate=${format.bitrate}, detectedCodec=$detectedCodec -> qualityPill=[codec=${updated.audioCodec}, bitrate=${updated.bitrateKbps}kbps, rate=${updated.samplingRateKHz}kHz]")
+                            android.util.Log.i("MusicPlayer", "AudioInputFormatChanged: mime=${format.sampleMimeType}, rate=${rateHz}Hz, bitrate=${format.bitrate}, detectedCodec=$detectedCodec -> qualityPill=[codec=${updated.audioCodec}, depth=${updated.bitDepth}, bitrate=${updated.bitrateKbps}kbps, rate=${updated.samplingRateKHz}kHz]")
                             updated
                         }
                         if (isSpatialAudioCodec(detectedCodec)) {
@@ -1171,43 +1211,22 @@ class MusicPlayer @Inject constructor(
             }
     }
 
-    private fun onDecodedPcmFormatConfigured(rateHz: Int, encoding: Int) {
+    private fun onDecodedPcmFormatConfigured(rateHz: Int) {
         if (rateHz <= 0) return
-        val depth = when (encoding) {
-            C.ENCODING_PCM_16BIT -> 16
-            C.ENCODING_PCM_24BIT -> 24
-            C.ENCODING_PCM_32BIT -> 32
-            else -> null
-        }
+        // The sink's format.pcmEncoding (the callback's second argument) is the
+        // DECODER's output width, not the song's depth, and is deliberately
+        // dropped: the bundled FFmpeg decoder only ever emits
+        // ENCODING_PCM_16BIT or ENCODING_PCM_FLOAT, so treating it as source
+        // depth relabelled every 24-bit track as 16-bit a moment after playback
+        // started. Only the sample rate (preserved end to end) is recorded; the
+        // pill's depth comes from publishResolvedQuality / the local retriever,
+        // which describe the song itself.
         decodedSampleRateHz = rateHz
         val rateKHz = rateHz / 1000.0
         _state.update { current ->
             val isSpatial = isSpatialAudioCodec(current.audioCodec)
             if (isSpatial) return@update current
-            val effectiveDepth = when {
-                rateHz > 192_000 || rateKHz > 192.0 -> 32
-                rateHz > 48_000 || rateKHz > 48.0 -> 24
-                (current.bitDepth ?: 0) > 16 -> current.bitDepth!!
-                depth != null && depth > 16 -> depth
-                inferBitDepth(current)?.let { it > 16 } == true -> inferBitDepth(current)!!
-                current.bitDepth != null -> current.bitDepth!!
-                depth != null -> depth
-                else -> 16
-            }
-            val isFlac = isFlacLikeCodec(current.audioCodec) || current.isLossless
-            val hasExplicit = isExplicitQuality(current.audioCodec, current.bitDepth, current.samplingRateKHz)
-            val isMismatched16Bit = current.audioCodec?.startsWith("16/") == true && (rateHz > 48_000 || rateKHz > 48.0)
-            val updatedCodec = if (isFlac && (!hasExplicit || isMismatched16Bit || current.audioCodec == "FLAC" || current.audioCodec == "HI-RES FLAC" || current.audioCodec == "LOSSLESS")) {
-                "$effectiveDepth/${formatSampleRateKHz(rateKHz)}kHz"
-            } else {
-                current.audioCodec
-            }
-            current.copy(
-                samplingRateKHz = rateKHz,
-                bitDepth = effectiveDepth,
-                audioCodec = updatedCodec,
-                isLossless = if (isFlac) true else current.isLossless,
-            )
+            if (current.samplingRateKHz == rateKHz) current else current.copy(samplingRateKHz = rateKHz)
         }
         updateBitPerfectState()
     }
@@ -1871,11 +1890,26 @@ class MusicPlayer @Inject constructor(
                     persistPlaybackSession()
                     return@withContext
                 }
-                val index = (player.currentMediaItemIndex + 1).coerceAtMost(player.mediaItemCount)
+                val wasEnded = player.playbackState == Player.STATE_ENDED
+                val wasEmpty = player.mediaItemCount == 0
+                val currentIndex = player.currentMediaItemIndex
+                val index = (currentIndex + 1).coerceIn(0, player.mediaItemCount)
                 player.addMediaItem(index, enriched.toMediaItem())
                 // Under shuffle the insert lands at a random permutation spot;
                 // pin it directly after the current track so it truly plays next.
                 placeInsertedIndexInShuffleOrder(index, last = false)
+                refresh(player)
+                enrichUpcomingQueue(currentIndex.coerceAtLeast(0))
+                val nextIndex = if (player.shuffleModeEnabled) player.nextMediaItemIndex else (currentIndex + 1)
+                if (nextIndex != C.INDEX_UNSET && nextIndex in 0 until player.mediaItemCount) {
+                    preloadNextTrack(nextIndex, player.getMediaItemAt(nextIndex).toPlayableTrack())
+                }
+                if (wasEmpty || wasEnded) {
+                    player.seekToDefaultPosition(index)
+                    player.prepare()
+                    player.play()
+                }
+                persistPlaybackSession()
             }
         }
     }
@@ -1888,10 +1922,26 @@ class MusicPlayer @Inject constructor(
                     _state.update { it.copy(queue = it.queue + enriched) }
                     persistPlaybackSession()
                 } else {
+                    val wasEnded = player.playbackState == Player.STATE_ENDED
+                    val wasEmpty = player.mediaItemCount == 0
+                    val previousCount = player.mediaItemCount
                     player.addMediaItem(enriched.toMediaItem())
                     // Under shuffle the append lands at a random permutation
                     // spot; pin it at the end of the actual play order.
                     placeInsertedIndexInShuffleOrder(player.mediaItemCount - 1, last = true)
+                    refresh(player)
+                    val currentIndex = player.currentMediaItemIndex
+                    enrichUpcomingQueue(currentIndex.coerceAtLeast(0))
+                    val nextIndex = if (player.shuffleModeEnabled) player.nextMediaItemIndex else currentIndex + 1
+                    if (nextIndex == player.mediaItemCount - 1) {
+                        preloadNextTrack(nextIndex, player.getMediaItemAt(nextIndex).toPlayableTrack())
+                    }
+                    if (wasEmpty || (wasEnded && currentIndex >= previousCount - 1)) {
+                        player.seekToDefaultPosition(previousCount)
+                        player.prepare()
+                        player.play()
+                    }
+                    persistPlaybackSession()
                 }
             }
         }
@@ -2645,6 +2695,16 @@ class MusicPlayer @Inject constructor(
             ?: audioSinks.firstNotNullOfOrNull { sink ->
                 runCatching { sink.exclusiveSourceSampleRateHz() }.getOrNull()?.takeIf { it > 0 }
             }
+        // Backfill the MEASURED rate into state when metadata omitted it
+        // (rate only — never depth). Without this a stream that reported only
+        // a depth would render as a bare "24-BIT FLAC" for audio the pipeline
+        // proves is running at 96kHz.
+        // Spatial is excluded: its 48kHz here is a forced pipeline rate.
+        if (snapshot.samplingRateKHz == null && (sourceRateHz ?: 0) > 0 &&
+            !isSpatialAudioCodec(snapshot.audioCodec)
+        ) {
+            _state.update { it.copy(samplingRateKHz = sourceRateHz!! / 1000.0) }
+        }
         val platformRateHz = runCatching { audioManager?.mixerRateHz() }.getOrNull() ?: 0
         val speed = if (initialized) {
             runCatching { player.playbackParameters.speed }.getOrDefault(snapshot.speed)
@@ -2705,14 +2765,18 @@ class MusicPlayer @Inject constructor(
             SignalPathInput(
                 sourceLabel = srcLabel,
                 sourceRateHz = sourceRateHz,
-                sourceBitDepth = when {
-                    (sourceRateHz ?: 0) > 192_000 || (snapshot.samplingRateKHz ?: 0.0) > 192.0 -> 32
-                    (sourceRateHz ?: 0) > 48_000 || (snapshot.samplingRateKHz ?: 0.0) > 48.0 -> 24
-                    else -> parseQualityFromCodec(srcLabel)?.substringBefore('/')?.toIntOrNull()
-                        ?: parseQualityFromCodec(snapshot.audioCodec)?.substringBefore('/')?.toIntOrNull()
-                        ?: snapshot.bitDepth?.takeIf { it > 0 }
-                        ?: inferBitDepth(snapshot)
-                },
+                // The source row follows the same shared hi-res rule as the pill
+                // (resolveDepthForDisplay), so the dialog can never disagree
+                // with the badge. Only when that yields nothing do we fall back
+                // to parsing an explicit depth out of the label; the sample
+                // rate alone still never asserts a depth here.
+                sourceBitDepth = resolveDepthForDisplay(
+                    snapshot.bitDepth,
+                    snapshot.samplingRateKHz,
+                )
+                    ?: parseQualityFromCodec(srcLabel)?.substringBefore('/')?.toIntOrNull()
+                    ?: parseQualityFromCodec(snapshot.audioCodec)?.substringBefore('/')?.toIntOrNull()
+                    ?: inferBitDepth(snapshot, allowRateGuess = false),
                 isLossless = snapshot.isLossless,
                 appOutputRateHz = appRateHz,
                 platformMixerRateHz = platformRateHz,
@@ -2917,10 +2981,12 @@ class MusicPlayer @Inject constructor(
         }
         if (index !in order) return
         order.remove(index)
-        if (last) {
+        val currentIndex = player.currentMediaItemIndex
+        val currentPos = order.indexOf(currentIndex)
+        if (last || currentPos == -1) {
             order.add(index)
         } else {
-            val at = (order.indexOf(player.currentMediaItemIndex) + 1).coerceIn(0, order.size)
+            val at = (currentPos + 1).coerceIn(0, order.size)
             order.add(at, index)
         }
         player.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), Random.nextLong()))
@@ -3044,10 +3110,13 @@ class MusicPlayer @Inject constructor(
         if (mediaItem.localConfiguration?.uri?.scheme != "lastwave" && prepared?.isExpired() != true) {
             // Already resolved: publish quality synchronously so the badge is
             // correct from the first frame (no transition may fire for a
-            // same-item play to republish it later).
-            mediaItem.localConfiguration?.customCacheKey
-                ?.let(preparedStreams::get)
-                ?.let(::publishResolvedQuality)
+            // same-item play to republish it later). The stream is also staged,
+            // because takeOverPlayback's seek fires the transition reset that
+            // clears these very fields.
+            prepared?.let { stream ->
+                stagePendingQuality(mediaItem.mediaId, stream)
+                publishResolvedQuality(stream)
+            }
             takeOverPlayback(index, mediaItem.mediaId)
             preloadNextQueueItem(index)
             return
@@ -3103,6 +3172,10 @@ class MusicPlayer @Inject constructor(
                         return@withContext
                     }
                     registerPreparedStream(resolved)
+                    // Staged so the transition reset fired by takeOverPlayback's
+                    // seek hands the resolved depth straight back instead of
+                    // blanking the pill.
+                    stagePendingQuality(expectedMediaId, resolved)
                     publishResolvedQuality(resolved)
                     applyDacRoutingFor(dacRateFor(resolved))
                     logStreamEvent("queue-prepare", resolved, retry = 0)
@@ -3143,6 +3216,7 @@ class MusicPlayer @Inject constructor(
                                 return@withContext
                             }
                             registerPreparedStream(ytFallback)
+                            stagePendingQuality(expectedMediaId, ytFallback)
                             publishResolvedQuality(ytFallback)
                             applyDacRoutingFor(dacRateFor(ytFallback))
                             logStreamEvent("queue-prepare-yt-fallback", ytFallback, retry = 0)
@@ -4632,10 +4706,14 @@ class MusicPlayer @Inject constructor(
 
         val resolvedBadge = badge ?: when {
             mime.contains("flac") -> {
-                val d = bitDepth ?: if ((samplingRateKHz ?: 0.0) > 48.0) 24 else 16
+                // Retriever facts only: present depth is trusted (even
+                // 16/96), absent depth is unknown — the rate alone never
+                // asserts 16 or 24 here.
+                val d = bitDepth?.takeIf { it > 0 }
                 if (samplingRateKHz != null && samplingRateKHz > 0.0) {
-                    "$d/${formatSampleRateKHz(samplingRateKHz)}kHz"
-                } else if (d > 16) "HI-RES FLAC" else "FLAC"
+                    if (d != null) "$d/${formatSampleRateKHz(samplingRateKHz)}kHz"
+                    else "${formatSampleRateKHz(samplingRateKHz)}kHz FLAC"
+                } else if ((d ?: 0) > 16) "HI-RES FLAC" else "FLAC"
             }
             mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") -> "M4A AAC"
             mime.contains("opus") || mime.contains("ogg") -> "OPUS"
@@ -4653,8 +4731,8 @@ class MusicPlayer @Inject constructor(
             audioCodec = resolvedBadge,
             cacheKey = "local:$trackKey",
             isLossless = isLossless,
-            bitDepth = bitDepth,
-            samplingRateKHz = samplingRateKHz,
+            bitDepth = bitDepth?.takeIf { it > 0 },
+            samplingRateKHz = samplingRateKHz?.takeIf { it > 0.0 },
         )
     }
 
@@ -4716,7 +4794,7 @@ class MusicPlayer @Inject constructor(
             audioCodec = segBridge.audioBadge(descriptor),
             cacheKey = "offline:${displayArtist.lowercase()}_${displayTitle.lowercase()}",
             isLossless = !s.codec.equals("opus", ignoreCase = true),
-            bitDepth = s.bitDepth.takeIf { it > 0 },
+            bitDepth = s.bitDepth?.takeIf { it > 0 },
             samplingRateKHz = s.sampleRate.takeIf { it > 0 }?.div(1000.0),
             // Seed the slider denominator: the MPD timeline alone may take a
             // while to parse, and without this the bar sat dead until then.
@@ -5316,23 +5394,23 @@ class MusicPlayer @Inject constructor(
             else -> null
         }
         val effectiveRate = if (stream.samplingRate > 1000.0) stream.samplingRate / 1000.0 else stream.samplingRate
-        val resolvedBitDepth = when {
-            effectiveRate > 192.0 -> 32
-            effectiveRate > 48.0 -> 24
-            stream.bitDepth > 16 -> stream.bitDepth
-            stream.formatId == LosslessMusicApi.QUALITY_MAX_HI_RES || stream.formatId == LosslessMusicApi.QUALITY_HI_RES_96 -> 24
-            else -> stream.bitDepth
-        }
+        // Depth the stream reported, through the shared hi-res rule: a rate
+        // above 48kHz is 24-bit in practice, so a reported 16 there is
+        // corrected to 24 instead of shown as 16. At or below 48kHz nothing
+        // is assumed — an unknown depth stays unknown rather than claiming 24
+        // from the rate alone. The decoder's PCM encoding is not consulted at
+        // all; it describes the decoder's output, not the song.
+        val resolvedBitDepth: Int? = resolveDepthForDisplay(stream.bitDepth.takeIf { it > 0 }, effectiveRate)
         val badge = when {
             stream.audioCodecOverride != null -> stream.audioCodecOverride
             // Spatial badges only from manifest evidence: the request's
             // preferred format must never dress a stereo fallback as Atmos.
             manifestCodecBadge == "DOLBY ATMOS" || manifestCodecBadge == "SPATIAL AUDIO" ->
                 manifestCodecBadge
-            resolvedBitDepth > 0 && effectiveRate > 0.0 ->
+            (resolvedBitDepth ?: 0) > 0 && effectiveRate > 0.0 ->
                 "$resolvedBitDepth/${formatSampleRateKHz(effectiveRate)}kHz"
             manifestCodecBadge != null -> manifestCodecBadge
-            resolvedBitDepth > 16 || effectiveRate > 48.0 -> "HI-RES FLAC"
+            (resolvedBitDepth ?: 0) > 16 || effectiveRate > 48.0 -> "HI-RES FLAC"
             stream.formatId == LosslessMusicApi.QUALITY_MP3_320 -> "MP3 320k"
             stream.formatId == LosslessMusicApi.QUALITY_DATA_SAVER -> "HE-AAC"
             else -> "LOSSLESS"
@@ -5439,7 +5517,7 @@ class MusicPlayer @Inject constructor(
             audioCodec = badge,
             cacheKey = "lossless:${track.mediaIdKey()}:${stream.formatId}",
             isLossless = isLossless,
-            bitDepth = resolvedBitDepth.takeIf { it > 0 },
+            bitDepth = resolvedBitDepth?.takeIf { it > 0 },
             samplingRateKHz = effectiveRate.takeIf { it > 0.0 },
             durationMs = stream.durationSeconds.takeIf { it > 0 }?.times(1_000L)
                 ?: track.durationMs
@@ -6001,12 +6079,12 @@ class MusicPlayer @Inject constructor(
             val isOpus = mime.contains("opus") || mime.contains("ogg") || url.endsWith(".opus", ignoreCase = true)
             val isMp3 = mime.contains("mp3") || mime.contains("mpeg") || url.endsWith(".mp3", ignoreCase = true)
 
-            val effectiveBitDepth = when {
-                (sampleRateKHz ?: 0.0) > 192.0 -> 32
-                (sampleRateKHz ?: 0.0) > 48.0 -> 24
-                bitDepth != null && bitDepth > 16 -> bitDepth
-                else -> bitDepth ?: if (isFlac) 16 else null
-            }
+            // Retriever values are measured container facts (STREAMINFO),
+            // not backend hearsay: a present 16 beside 96kHz is a genuine
+            // 16/96 file — trust it. Absent stays absent (unknown, not 16;
+            // missing rate is not 44.1kHz either). The decoder's measured
+            // PCM encoding restores certainty where measurable.
+            val effectiveBitDepth = bitDepth?.takeIf { it > 0 }
 
             val codec = when {
                 isFlac && effectiveBitDepth != null && sampleRateKHz != null && sampleRateKHz > 0.0 ->
@@ -6024,7 +6102,7 @@ class MusicPlayer @Inject constructor(
                     audioCodec = codec,
                     bitrateKbps = bitrateKbps,
                     bitDepth = effectiveBitDepth,
-                    samplingRateKHz = sampleRateKHz ?: if (isFlac) 44.1 else null,
+                    samplingRateKHz = sampleRateKHz,
                     // FLAC is lossless at every bit depth. Requiring >16 here
                     // marked CD-quality (16/44.1) FLAC — and any FLAC whose
                     // container omits BITS_PER_SAMPLE — as lossy, which pushed
@@ -6050,13 +6128,14 @@ class MusicPlayer @Inject constructor(
                 lower.endsWith(".wav") -> "WAV"
                 else -> "AUDIO"
             }
-            val isFlac = fallbackCodec == "FLAC"
             _state.update {
                 it.copy(
                     audioCodec = fallbackCodec,
-                    bitDepth = if (isFlac) 16 else null,
-                    samplingRateKHz = if (isFlac) 44.1 else null,
-                    isLossless = isFlac,
+                    // Unknown, not 16/44.1: asserting depths/rates for an
+                    // unreadable file is exactly the false-tag bug.
+                    bitDepth = null,
+                    samplingRateKHz = null,
+                    isLossless = fallbackCodec == "FLAC",
                 )
             }
             onMain {

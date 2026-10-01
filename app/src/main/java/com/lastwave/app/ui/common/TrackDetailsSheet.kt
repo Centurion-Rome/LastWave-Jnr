@@ -49,6 +49,7 @@ import com.lastwave.app.playback.isSpatialAudioCodec
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.MusicPlayerState
 import com.lastwave.app.playback.qualityBadgeLabel
+import com.lastwave.app.playback.resolveDepthForDisplay
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -184,13 +185,11 @@ private fun describeLiveCodec(state: MusicPlayerState): String {
 /** Resolution row for live player state (same numbers as the Now Playing pill). */
 private fun describeLiveResolution(state: MusicPlayerState): String {
     val rate = state.samplingRateKHz
-    val depth = when {
-        rate != null && rate > 192.0 -> 32
-        rate != null && rate > 48.0 -> 24
-        state.bitDepth != null && state.bitDepth > 16 -> state.bitDepth
-        state.audioCodec?.contains("HI-RES", ignoreCase = true) == true || state.audioCodec?.contains("HI_RES", ignoreCase = true) == true -> 24
-        else -> state.bitDepth
-    }
+    // Same shared rule as the pill: a rate above 48kHz is 24-bit in practice,
+    // so a reported 16 is corrected to 24 there rather than shown as 16. At or
+    // below 48kHz nothing is assumed.
+    val depth = resolveDepthForDisplay(state.bitDepth, rate)
+        ?: com.lastwave.app.playback.inferBitDepth(state.copy(bitDepth = null), allowRateGuess = false)
     val kbps = state.bitrateKbps
     if (isSpatialAudioCodec(state.audioCodec)) {
         val rateText = rate?.let { "${formatSampleRateKHz(it)} kHz" } ?: "48.0 kHz"
@@ -199,6 +198,10 @@ private fun describeLiveResolution(state: MusicPlayerState): String {
     if (depth != null && rate != null && rate > 0.0) {
         val kbpsText = kbps?.takeIf { it > 0 }?.let { " ($it kbps)" } ?: ""
         return "$depth-bit / ${formatSampleRateKHz(rate)} kHz$kbpsText"
+    }
+    if (rate != null && rate > 0.0) {
+        val kbpsText = kbps?.takeIf { it > 0 }?.let { " ($it kbps)" } ?: ""
+        return "${formatSampleRateKHz(rate)} kHz FLAC$kbpsText"
     }
     return "Analyzing..."
 }
@@ -411,7 +414,10 @@ class TrackDetailsViewModel @Inject constructor(
                         !s.codec.equals("aac", ignoreCase = true) &&
                         !s.codec.contains("mp4a", ignoreCase = true))
                     val rateKHz = if (s.sampleRate > 1000) s.sampleRate / 1000.0 else s.sampleRate.toDouble()
-                    val depth = if (rateKHz > 192.0) 32 else if (rateKHz > 48.0) 24 else if (s.bitDepth > 0) s.bitDepth else 16
+                    // Shared hi-res rule: a rate above 48kHz implies 24-bit in practice, so a
+                    // module-reported 16 is corrected to 24 there. An omitted
+                    // depth below 48kHz stays unknown.
+                    val depth: Int? = resolveDepthForDisplay(s.bitDepth, rateKHz)
                     val badge = if (isAtmos) {
                         "DOLBY ATMOS"
                     } else if (isLossless) {
@@ -432,8 +438,12 @@ class TrackDetailsViewModel @Inject constructor(
                     }
                     val depthRate = if (isAtmos) {
                         "24-bit / ${if (s.sampleRate > 0) s.sampleRate / 1000.0 else 48.0} kHz (6 Channels Spatial)"
-                    } else {
+                    } else if (depth != null) {
                         "$depth-bit / ${if (rateKHz > 0.0) rateKHz else 44.1} kHz (${if (s.bandwidth > 0) s.bandwidth / 1000 else 1411} kbps)"
+                    } else if (rateKHz > 0.0) {
+                        "${if (rateKHz % 1.0 == 0.0) rateKHz.toInt().toString() else rateKHz} kHz (${if (s.bandwidth > 0) s.bandwidth / 1000 else 1411} kbps)"
+                    } else {
+                        "Lossless (${if (s.bandwidth > 0) s.bandwidth / 1000 else 1411} kbps)"
                     }
                     val durText = downloaded?.durationMs?.takeIf { it > 0L }?.let { ms ->
                         val dur = (ms / 1000).toInt()
@@ -458,11 +468,14 @@ class TrackDetailsViewModel @Inject constructor(
                     val codec = if (rawMime.contains("mp4") || rawMime.contains("m4a")) "Advanced Audio Coding (AAC)" else "Opus Interactive Audio"
                     val badge = if (rawMime.contains("mp4") || rawMime.contains("m4a")) "M4A 256k" else "OPUS 160k"
                     val bitrate = ytStream?.bitrate?.takeIf { it > 0 }?.let { "${(it + 500) / 1000} kbps" } ?: "160 kbps"
-
+                    // A YouTube Opus/AAC rendition carries no source bit depth and
+                    // no fixed rate: the CDN transcodes per listener, so neither
+                    // value describes the release. The bitrate is the only real
+                    // measurement available here.
                     _specs.value = _specs.value?.copy(
                         qualityBadge = badge,
                         audioCodec = codec,
-                        bitDepthSampleRate = "16-bit / 48.0 kHz ($bitrate)",
+                        bitDepthSampleRate = bitrate,
                         provider = "YouTube Music CDN",
                         isLossless = false,
                     )

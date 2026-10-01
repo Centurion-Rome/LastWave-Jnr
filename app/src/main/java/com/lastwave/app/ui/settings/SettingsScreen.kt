@@ -108,6 +108,9 @@ import com.lastwave.app.data.local.LyricsAnimation
 import com.lastwave.app.data.local.LyricsProvider
 import com.lastwave.app.data.local.LyricsUiVersion
 import com.lastwave.app.ui.player.LyricsOffsetDialog
+import com.lastwave.app.ui.player.LyricsSizeDialog
+import androidx.compose.material.icons.filled.FormatSize
+import kotlin.math.roundToInt
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Palette
@@ -288,7 +291,8 @@ private fun getTargetSectionIndex(settingId: String?): Int {
         SettingsTab.AUDIO -> if (entry.section == "Output & Loudness") 1 else 0
         SettingsTab.APPEARANCE -> when (entry.section) {
             "Accent Color" -> 1
-            "Experimental & Player" -> 2
+            "Experimental & Features", "Experimental & Player" -> 2
+            "Canvas" -> 3
             else -> 0
         }
         SettingsTab.LIBRARY -> when (entry.section) {
@@ -466,6 +470,7 @@ fun SettingsScreen(
     var showLyricsAnimationSheet by remember { mutableStateOf(false) }
     var showLyricsProviderDialog by remember { mutableStateOf(false) }
     var showLyricsOffsetDialog by remember { mutableStateOf(false) }
+    var showLyricsSizeDialog by remember { mutableStateOf(false) }
     var showLoudnessDialog by remember { mutableStateOf(false) }
     var showClarityPresetDialog by remember { mutableStateOf(false) }
     var showSyncPlaylistsSheet by remember { mutableStateOf(false) }
@@ -1144,7 +1149,7 @@ fun SettingsScreen(
                         item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_experimental))
-                    SettingsGroup(rowCount = 5) { index, position ->
+                    SettingsGroup(rowCount = 7) { index, position ->
                         when (index) {
                             0 -> SettingsActionCard(
                                 icon = Icons.Filled.Lyrics,
@@ -1166,16 +1171,31 @@ fun SettingsScreen(
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
                                 title = stringResource(R.string.settings_wavy_seekbar),
                                 subtitle = if (misc.wavySeekbarEnabled) {
-                                    "Multi-layer fluid wavy progress slider"
+                                    stringResource(R.string.settings_wavy_seekbar_on)
                                 } else {
-                                    "Classic standard progress slider"
+                                    stringResource(R.string.settings_wavy_seekbar_off)
                                 },
                                 checked = misc.wavySeekbarEnabled,
                                 onCheckedChange = viewModel::setWavySeekbarEnabled,
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.wavy_seekbar"),
                             )
-                            2 -> SettingsActionCard(
+                            2 -> SettingsToggleCard(
+                                icon = Icons.Filled.RestartAlt,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = stringResource(R.string.settings_rotating_background),
+                                subtitle = if (misc.rotatingBackgroundEnabled) {
+                                    stringResource(R.string.settings_rotating_background_on)
+                                } else {
+                                    stringResource(R.string.settings_rotating_background_off)
+                                },
+                                checked = misc.rotatingBackgroundEnabled,
+                                onCheckedChange = viewModel::setRotatingBackgroundEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "appearance.rotating_background"),
+                            )
+                            3 -> SettingsActionCard(
                                 icon = Icons.Filled.Lyrics,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1185,7 +1205,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_provider"),
                             )
-                            3 -> SettingsActionCard(
+                            4 -> SettingsActionCard(
                                 icon = Icons.Filled.Timer,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1199,7 +1219,24 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_offset"),
                             )
-                            4 -> SettingsToggleCard(
+                            5 -> SettingsActionCard(
+                                icon = Icons.Filled.FormatSize,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = "Lyrics text size",
+                                subtitle = "${(misc.lyricsFontScale * 100).roundToInt()}% \u2022 ${
+                                    when {
+                                        misc.lyricsFontScale < 0.85f -> "Small"
+                                        misc.lyricsFontScale in 0.85f..1.15f -> "Standard"
+                                        misc.lyricsFontScale in 1.16f..1.35f -> "Large"
+                                        else -> "Extra Large"
+                                    }
+                                }",
+                                onClick = { showLyricsSizeDialog = true },
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "appearance.lyrics_size"),
+                            )
+                            6 -> SettingsToggleCard(
                                 icon = Icons.Filled.VolumeUp,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -2030,6 +2067,15 @@ fun SettingsScreen(
             currentMs = misc.lyricsOffsetMs,
             onSelect = { viewModel.setLyricsOffsetMs(it) },
             onDismiss = { showLyricsOffsetDialog = false },
+        )
+    }
+
+    // -- Lyrics text size dialog: scales font size with live preview --
+    if (showLyricsSizeDialog) {
+        LyricsSizeDialog(
+            currentScale = misc.lyricsFontScale,
+            onSelect = { viewModel.setLyricsFontScale(it) },
+            onDismiss = { showLyricsSizeDialog = false },
         )
     }
 
