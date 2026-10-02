@@ -77,6 +77,8 @@ class PlaylistViewModel @Inject constructor(
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val trackDownloadManager: com.lastwave.app.data.download.TrackDownloadManager,
     private val settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
+    private val innerTubeApi: com.lastwave.app.data.music.InnerTubeMusicApi,
+    private val routeNavigator: com.lastwave.app.ui.navigation.AppRouteNavigator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PlaylistUiState())
@@ -470,8 +472,45 @@ class PlaylistViewModel @Inject constructor(
     fun confirmDelete() {
         val id = _uiState.value.deleteConfirmForPlaylistId ?: return
         viewModelScope.launch {
-            playlistRepository.delete(id)
+            val playlist = _uiState.value.playlists.find { it.id == id }
+            if (playlist != null) {
+                val ytId = playlist.remotePlaylistId
+                if (ytId != null) {
+                    try {
+                        val actualId = if (ytId.startsWith("VL")) ytId.drop(2) else ytId
+                        innerTubeApi.deleteRemotePlaylist(actualId)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+            if (id >= 0L) {
+                playlistRepository.delete(id)
+            }
             _uiState.update { it.copy(deleteConfirmForPlaylistId = null) }
+            load()
+        }
+    }
+
+    fun deleteMultiple(ids: Set<Long>) {
+        viewModelScope.launch {
+            for (id in ids) {
+                val playlist = _uiState.value.playlists.find { it.id == id }
+                if (playlist != null) {
+                    val ytId = playlist.remotePlaylistId
+                    if (ytId != null) {
+                        try {
+                            val actualId = if (ytId.startsWith("VL")) ytId.drop(2) else ytId
+                            innerTubeApi.deleteRemotePlaylist(actualId)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+                if (id >= 0L) {
+                    playlistRepository.delete(id)
+                }
+            }
             load()
         }
     }
@@ -574,6 +613,9 @@ class PlaylistViewModel @Inject constructor(
                         else -> "All songs already downloaded"
                     },
                 )
+            }
+            if (queued > 0) {
+                routeNavigator.navigateTo(com.lastwave.app.ui.navigation.Screen.Downloads.route)
             }
         }
     }

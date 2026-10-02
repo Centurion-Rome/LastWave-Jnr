@@ -147,6 +147,7 @@ enum class TrackDownloadStatus {
 class DownloadMenuViewModel @Inject constructor(
     private val downloadManager: com.lastwave.app.data.download.TrackDownloadManager,
     settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
+    private val routeNavigator: com.lastwave.app.ui.navigation.AppRouteNavigator,
 ) : ViewModel() {
     val activeDownloads = downloadManager.downloads
 
@@ -178,6 +179,7 @@ class DownloadMenuViewModel @Inject constructor(
             videoId = videoId,
             durationMs = durationMs,
         )
+        routeNavigator.navigateTo(com.lastwave.app.ui.navigation.Screen.Downloads.route)
     }
 }
 
@@ -285,6 +287,7 @@ fun TrackContextMenuSheet(
     onDeleteScrobble: ((trackName: String, artistName: String) -> Unit)? = null,
     onRefreshArtwork: (() -> Unit)? = null,
     onRemoveFromPlaylist: (() -> Unit)? = null,
+    onRemoveFromQueue: (() -> Unit)? = null,
     genreResolverViewModel: GenreRowViewModel = hiltViewModel(),
     startMixViewModel: StartMixMenuViewModel = hiltViewModel(),
     exploreGenreViewModel: ExploreGenreMenuViewModel = hiltViewModel(),
@@ -577,6 +580,14 @@ fun TrackContextMenuSheet(
                         add { pos ->
                             MenuActionRow(Icons.Filled.Delete, "Remove from Playlist", danger = true, position = pos) {
                                 onRemoveFromPlaylist()
+                                onDismiss()
+                            }
+                        }
+                    }
+                    if (onRemoveFromQueue != null) {
+                        add { pos ->
+                            MenuActionRow(Icons.Filled.Delete, "Remove from Queue", danger = true, position = pos) {
+                                onRemoveFromQueue()
                                 onDismiss()
                             }
                         }

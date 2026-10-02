@@ -177,6 +177,7 @@ import androidx.compose.ui.res.stringResource
 import com.lastwave.app.data.local.AppLanguage
 import com.lastwave.app.data.local.nativeDisplayName
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -379,7 +380,7 @@ enum class SettingsTab(
     ),
     APPEARANCE(
         title = "Appearance & Visuals",
-        subtitle = "Themes, Accent colors, Fluid artwork, Canvas, Lyrics",
+        subtitle = "Themes, Colors, Artwork, Lyrics",
         icon = Icons.Filled.Palette,
     ),
     YOUTUBE(
@@ -655,18 +656,9 @@ fun SettingsScreen(
                         item {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 SectionLabel("Services & Addons")
-                                SettingsGroup(rowCount = 3) { index, position ->
+                                SettingsGroup(rowCount = 2) { index, position ->
                                     when (index) {
                                         0 -> SettingsActionCard(
-                                            icon = Icons.Filled.Extension,
-                                            iconContainer = MaterialTheme.colorScheme.secondaryContainer,
-                                            iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            title = "Modules & Addons",
-                                            subtitle = "Manage lossless streaming providers and remote addons",
-                                            onClick = onOpenModules,
-                                            position = position,
-                                        )
-                                        1 -> SettingsActionCard(
                                             icon = Icons.Filled.Album,
                                             iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -708,7 +700,7 @@ fun SettingsScreen(
                                             iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
                                             title = "Appearance & Visuals",
-                                            subtitle = "Themes, Accent colors, Fluid artwork, Canvas, Lyrics",
+                                            subtitle = "Themes, Colors, Artwork, Lyrics",
                                             onClick = { activeTab = SettingsTab.APPEARANCE },
                                             position = position,
                                         )
@@ -1566,62 +1558,63 @@ fun SettingsScreen(
                                 }
                             }
                         }
-
                         item {
-                Card(
-                    onClick = onOpenModules,
-                    shape = RoundedCornerShape(22.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .settingHighlightGlow(
-                            isHighlighted = (highlightedSettingId == "library.modules"),
-                            shape = RoundedCornerShape(22.dp),
-                        ),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp).fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.secondary),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Filled.Extension,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSecondary,
-                                modifier = Modifier.size(22.dp),
-                            )
+                            Card(
+                                onClick = onOpenModules,
+                                shape = RoundedCornerShape(22.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .settingHighlightGlow(
+                                        isHighlighted = (highlightedSettingId == "library.modules"),
+                                        shape = RoundedCornerShape(22.dp),
+                                    ),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp).fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(44.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.secondary),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Extension,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSecondary,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                    Spacer(Modifier.width(16.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            stringResource(R.string.settings_modules_title),
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        )
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            stringResource(R.string.settings_modules_sub),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            }
                         }
-                        Spacer(Modifier.width(16.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                stringResource(R.string.settings_modules_title),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                stringResource(R.string.settings_modules_sub),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
-                            )
-                        }
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowForwardIos,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                }
-            }
+
+
                     }
 
                     SettingsTab.DATA_BACKUP -> {
@@ -2501,6 +2494,8 @@ private fun SectionLabel(text: String) {
         fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 

@@ -83,6 +83,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
@@ -379,17 +383,30 @@ fun MainShell(
             }
         }
 
-        FloatingNavBar(
-            backdrop = navigationBackdrop,
-            tabs = tabs,
-            selectedIndex = selectedTabIndex,
-            onSelect = { index ->
-                if (index != selectedTabIndex) selectedTabIndex = index
-                scope.launch { pagerState.animateScrollToPage(index) }
-            },
-            onOpenGenerator = onOpenGenerator,
-            modifier = Modifier.align(Alignment.BottomCenter),
-        )
+        val bottomNavSlot = com.lastwave.app.ui.player.LocalBottomNavSlot.current
+        val currentSelectedIndex by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
+        val currentOnSelect by androidx.compose.runtime.rememberUpdatedState { index: Int ->
+            if (index != selectedTabIndex) selectedTabIndex = index
+            scope.launch { pagerState.animateScrollToPage(index) }
+            Unit
+        }
+        val currentOnOpenGenerator by androidx.compose.runtime.rememberUpdatedState(onOpenGenerator)
+
+        androidx.compose.runtime.DisposableEffect(navigationBackdrop, tabs) {
+            bottomNavSlot.value = {
+                Box(Modifier.fillMaxSize()) {
+                    FloatingNavBar(
+                        backdrop = navigationBackdrop,
+                        tabs = tabs,
+                        selectedIndex = currentSelectedIndex,
+                        onSelect = currentOnSelect,
+                        onOpenGenerator = currentOnOpenGenerator,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+            }
+            onDispose { bottomNavSlot.value = {} }
+        }
     }
 }
 
@@ -474,6 +491,26 @@ private fun FloatingNavBar(
     val glassNavBounds = remember { mutableStateMapOf<Int, Rect>() }
     val dockInteraction = remember { MutableInteractionSource() }
     val fabInteraction = remember { MutableInteractionSource() }
+    
+    if (!liquidGlass) {
+        androidx.compose.material3.NavigationBar(
+            modifier = modifier.fillMaxWidth(),
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+        ) {
+            tabs.forEachIndexed { index, tab ->
+                val onClick = remember(index) { { onSelect(index) } }
+                NavigationBarItem(
+                    selected = selectedIndex == index,
+                    onClick = onClick,
+                    icon = { Icon(tab.icon(), contentDescription = null) },
+                    label = { Text(androidx.compose.ui.res.stringResource(tab.labelRes), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
+        }
+        return
+    }
+
     Box(
         modifier = modifier
             .windowInsetsPadding(
