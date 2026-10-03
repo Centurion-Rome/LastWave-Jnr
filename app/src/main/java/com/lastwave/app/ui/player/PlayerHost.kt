@@ -220,8 +220,13 @@ import com.lastwave.app.playback.formatSampleRateKHz
 import com.lastwave.app.playback.isSpatialAudioCodec
 import com.lastwave.app.playback.qualityBadgeLabel
 import com.lastwave.app.playback.PlaybackProgressState
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.lastwave.app.data.artwork.ArtworkNormalizer
 import com.lastwave.app.playback.PlayableTrack
 import com.lastwave.app.ui.common.ArtworkImage
+import com.lastwave.app.ui.common.ArtworkViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.lastwave.app.ui.common.ExpressiveInlineLoadingIndicator
 import com.lastwave.app.ui.common.ExpressiveMotion
 import com.lastwave.app.ui.common.PlaylistCover
@@ -1736,11 +1741,19 @@ private fun FullPlayer(
     // once per track through the shared Coil loader (normally a cache hit)
     // with Palette; any failure leaves the standard surface gradient.
     val context = LocalContext.current
+    val artworkViewModel: ArtworkViewModel = hiltViewModel()
+    val artworkKey = remember(track.title, track.artist) { ArtworkNormalizer.cacheKey(track.title, track.artist) }
+    val resolvedAmbientUrl by remember(artworkKey) {
+        artworkViewModel.resolved.map { it[artworkKey] }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = artworkViewModel.resolved.value[artworkKey])
+
     var ambientPrimary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
     var ambientSecondary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
     var ambientTertiary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
-    LaunchedEffect(track.videoId, track.artworkUrl, track.title, track.artist) {
-        val url = track.artworkUrl?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+    LaunchedEffect(track.videoId, track.artworkUrl, track.title, track.artist, resolvedAmbientUrl) {
+        val url = resolvedAmbientUrl?.takeIf { it.isNotBlank() }
+            ?: ArtworkNormalizer.upscaleYoutubeArtwork(track.artworkUrl)?.takeIf { it.isNotBlank() }
+            ?: return@LaunchedEffect
         withContext(Dispatchers.IO) {
             runCatching {
                 val request = ImageRequest.Builder(context)
@@ -2891,10 +2904,16 @@ private fun SeekBar(
     val seekInteraction = remember(trackKey) { MutableInteractionSource() }
     val frameworkDragging by seekInteraction.collectIsDraggedAsState()
     var dragFraction by remember(trackKey) { mutableStateOf<Float?>(null) }
+    var lastSeekFraction by remember(trackKey) { mutableStateOf<Float?>(null) }
     // Heal a gesture that ended without the finished callback: drop the dead
-    // value, resume live position. Never seeks; commit is only below.
+    // value, resume live position. A brief delay ensures onValueChangeFinished
+    // runs and captures the target fraction first.
     LaunchedEffect(frameworkDragging, trackKey) {
-        if (!frameworkDragging) dragFraction = null
+        if (!frameworkDragging) {
+            delay(120L)
+            dragFraction = null
+            lastSeekFraction = null
+        }
     }
 
     val boundedDurationMs = effectiveDurationMs.coerceAtLeast(0L)
@@ -2988,13 +3007,17 @@ private fun SeekBar(
             // Invisible Material interaction layer: custom visuals, reliable seeking semantics.
             Slider(
                 value = fraction,
-                onValueChange = { dragFraction = it },
+                onValueChange = {
+                    dragFraction = it
+                    lastSeekFraction = it
+                },
                 onValueChangeFinished = {
                     // Commit only this gesture's value; no value = no seek.
-                    val target = dragFraction?.let {
+                    val target = (lastSeekFraction ?: dragFraction)?.let {
                         (it * boundedDurationMs).toLong().coerceIn(0L, boundedDurationMs)
                     }
                     dragFraction = null
+                    lastSeekFraction = null
                     if (target != null && boundedDurationMs > 0L) {
                         onSeek(target)
                     }
