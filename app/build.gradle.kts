@@ -60,8 +60,8 @@ android {
         applicationId = "com.lastwave.app"
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
         targetSdk = 35
-        versionCode = 25
-        versionName = "4.2.5"
+        versionCode = 26
+        versionName = "4.2.6"
 
         // Native secrets (addon client lock) live strictly in native .so via
         // SecretsBridge_generated.h (tools/generate_native_secrets.py).

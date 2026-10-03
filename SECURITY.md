@@ -7,7 +7,7 @@ Security fixes are provided for the latest stable release of LastWave-Jnr.
 | Version | Supported          |
 | ------- | ------------------ |
 | 4.2.x   | Yes                |
-| < 4.2.5 | No                 |
+| < 4.2.6 | No                 |
 
 ## Reporting a Vulnerability
 

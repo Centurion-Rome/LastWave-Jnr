@@ -1,5 +1,152 @@
 # Changelog
 
+## [4.2.6] - 2026-10-03
+
+Fourth upstream sync from `Clash-Projects/LastWave-Native`, in two merges
+(`9efe06f` = 14 commits, `12492ba`..`cfff4ff8`; `112651f` = 7 commits,
+`cfff4ff8`..`1d67649c`) on top of the v4.2.5 fork point. **21 upstream
+commits, 66 files, +5836/-978.**
+
+### Added
+- **Crash and operational logging, split into two channels (#213, upstream
+  b76608f).** Replaces the 382 raw `android.util.Log` calls with a pure-JVM
+  core (`diagnostics/core/`: formatting, rotation, retention, drop accounting,
+  crash lead-up ring) behind a thin Android shell. The crash channel writes
+  one self-contained file per crash, newest 10 retained, covering uncaught
+  exceptions, ANRs (5s main-looper ping that captures the main thread stack
+  *before* Android writes its own trace), native crashes / low-memory kills /
+  system-recorded ANRs via `ApplicationExitInfo` (API 30+, deduped), and
+  unclean terminations via a running/clean session marker — each with version,
+  device, memory, storage, thread, stack and the 40 log lines preceding the
+  failure. The old crash log truncated at 128KB and destroyed all history; the
+  operational channel now rotates at 256KB across 5 files (1.25MB ceiling),
+  persisting errors and warnings always but debug/info only in debuggable
+  builds or with verbose logging on. Every record is a non-blocking enqueue on
+  a bounded queue drained by one writer thread, so nothing on an audio callback
+  waits on disk; overflow drops the *newest* record to preserve the lead-up and
+  reports the loss instead of silently truncating. `CrashGuard` is deleted.
+- **Multi-select playlist deletion and playlist sorting** (upstream b27e85d,
+  e009c79). Long-press selects, the header reports `N selected`, delete
+  cascades to the YouTube playlists and local rows, and a sort menu offers
+  Newest/Oldest first, Name and Track count.
+- **Draggable sleep-timer overlay** (upstream c001db0), plus a playlist
+  operation toast.
+
+### Changed
+- **Cover-art resolution enforces a strict provider priority: Apple Music →
+  Tidal → Deezer → Spotify → YouTube** (upstream 6640da7, corrected by 71681e6).
+  Nothing is accepted on a similarity score alone — a candidate's own title and
+  artist must agree with what was requested. `ArtworkNormalizer` grew the
+  normalization rules this needs, `ITunesArtworkProvider` was corrected, and
+  `ArtworkImage` now distinguishes a real cover from a fallback.
+- **Crossfade now survives lossless** (upstream eb9297a). It was never a
+  crossfade bug: the hand-off needs the standby player at `STATE_READY` and
+  nothing arranged that for provider-module FLAC. Arming is decoupled from the
+  fade window (the standby prepares seconds into the track instead of ~10s
+  before the hand-off), signed module URLs are refreshed ~30s ahead of expiry
+  instead of being discovered dead, and background preloads get an unbounded
+  resolve budget via a new `LosslessBudget` enum while interactive playback
+  keeps its 3.5-12s cap. Overlap is bounded by `standbyBufferedPosition`, so a
+  slow link yields a short complete fade rather than a 12s fade that dies at
+  second 4. `onDecodedPcmFormatConfigured` is gated on `handleAudioFocus` so
+  only the live player publishes into the pill. Policy extracted to
+  `CrossfadeSchedule.planCrossfade`, mirroring the `SignalPath.kt` pattern.
+- **Widget layouts** (square, expanded and the fork's obsidian square) resized
+  and aligned to the Kittytune reference (upstream b27e85d, 5b709df).
+- **Settings regrouped** into `Library & Content` alongside the existing
+  groups, now reporting the live download count (upstream 5b709df).
+- Quick-access tiles gain distinct Discover / New Releases / Mix gradients and
+  icons instead of one shared treatment (upstream 5b709df).
+
+### Fixed
+- **Songs skipping out 3-4 seconds into a track** (upstream 0d53ccd). This was
+  the most-reported symptom in the batch. `effectiveDuration` accepted the
+  previously published duration as its last fallback, so on a track whose
+  container had not parsed yet — `C.TIME_UNSET`, routine for YouTube
+  WebM/MP4 and provider-module FLAC — the incoming track inherited the
+  outgoing one's length. `updateCrossfade` then crossed the fade threshold
+  seconds in and swapped the *next* item in, abandoning the rest. The
+  duration's owning item is now tracked and cross-track reuse is refused
+  outright (reported as 0 — no denominator beats a wrong one), while
+  everything keyed to the item in hand is still trusted across a transition so
+  a mid-track rebuffer cannot freeze the bar at 0:00. Policy extracted to
+  `DurationSelection.selectDuration`.
+- **Seek bar advancing through a stall or a transition** ("playing while
+  buffering"). `advancePlayhead` free-ran on the wall clock whenever ExoPlayer
+  was IDLE or still held the previous item, because `_state.isPlaying` is
+  deliberately held true across resolve windows to keep the wake lock alive.
+  The playhead now freezes when nothing is rendering; USB-exclusive output
+  keeps its own stream clock.
+- **24-bit Hi-Res badge clobbered back to 16-bit** (upstream ecd20b4). The
+  queue preloader and the format listeners were still overwriting the badge
+  after the 4.2.5 depth fix — the same class of bug as the one fixed there,
+  one layer out.
+- **Seekbar freeze and lyrics sync instability** (upstream e9cf372, kept by
+  5e17598).
+- **CSV import failing in six independent ways, each costing songs** (upstream
+  1d67649). A single unclosed quote threw out of the parser and discarded every
+  row in the file; links were never checked against their row, so a stale link
+  imported whatever it pointed at; the fuzzy fallback took a single unchecked
+  60%-similar pick, substituting live cuts and remixes for the requested song;
+  any bare 11-character token in *any* column was treated as a video id;
+  title-only rows could never match, so a plain list of song names imported
+  nothing; a one-column file headed "Song" lost that song to header detection;
+  and delimiter ties broke toward a comma, shifting every column of a tab- or
+  semicolon-separated file containing a comma. Transport errors were
+  indistinguishable from "no match" (`searchSongs` folds them into an empty
+  list), so rows now retry with backoff and walk several query shapes,
+  validating every candidate rather than the top hit. A bad row now costs a
+  skipped entry instead of the wrong song.
+- **Near-mute and no-signal output on universal bit-perfect DACs** (upstream
+  c00c2ba). UAC 2.0 clock topology is now traversed properly
+  (AS_GENERAL → Terminal → Multiplier → Selector → Clock Source) for
+  dual-oscillator DACs; the `AudioStreaming` playback interface is isolated by
+  verifying isochronous OUT endpoints, which stops headset mic capture; the
+  64-sample silence heuristic in 24/32-bit packing is replaced by a full-buffer
+  scan (that heuristic was the source of the −48dB near-mute); the xHCI
+  pipeline is primed with silence URBs and synchronized with `CLOCK_VALID`/PLL
+  settling; explicit hardware unmute is issued on attach with a guard against
+  Android's USB-detach 0-volume transient; and `ExclusiveUsbWriter` runs at
+  `THREAD_PRIORITY_URGENT_AUDIO`.
+- **Static cover art stacked under the animated canvas** (upstream df11b4b).
+  The full-bleed hero composed `ArtworkImage` unconditionally and drew
+  `CanvasArtworkPlayer` on top, so the still cover stayed visible under motion
+  artwork. The canvas is now the artwork: the cover is a loading/error
+  placeholder crossfaded out and dropped from the tree once a real frame
+  arrives. The hero melt seam was separate — `heroPx` clamps at
+  `min(w*1.08, h*0.62)`, so on a tall screen the hero bottom landed past the
+  fixed `0.62` foundation ramp; the ramp is now keyed to `heroPx`. Motion
+  artwork also no longer renders with the Animated Album Canvas toggle off.
+- **Navigation tab labels ellipsized** in the bottom dock (upstream b27e85d,
+  plus the `TextOverflow` import fix in 00aa9e0).
+
+### Removed
+- **The "Get Addons" Telegram card and its `Don't have an addon?` link** in
+  module settings (upstream e9cf372, undoing their own 92e3922). The Support
+  section in `SettingsScreen.kt` still links the channel, so the path is not
+  lost. This was the only overlap with fork content in the whole sync — nothing
+  was dropped from the Jnr side.
+
+### Notes
+- **Conflict surface was almost nil.** Only `MusicPlayer.kt` and `PlayerHost.kt`
+  were touched by both sides and both auto-merged, with zero manual
+  intervention across both merges. The fork's VU meter, DOWNLOADS tab,
+  branding and reorder-lock all survived; `versionCode 25 / 4.2.5` unchanged.
+- **`:app:testDebugUnitTest` is green** (3m52s) with the new tests from this
+  batch: `ArtworkMatchingTest`, `CrossfadeScheduleTest`,
+  `DurationSelectionTest`, `CsvPlaylistImporterTest`, and five
+  `diagnostics/core/` suites (`LogStoreTest`, `LogQueueTest`,
+  `LogFormatterTest`, `LogTailTest`, `RetentionTest`).
+- **The cover-art DstIn dissolve landed and was then reverted.** `bae2ab7`
+  dissolved the full-bleed cover via an offscreen `DST_IN` blend mask; `5e17598`
+  reverted it while keeping the seekbar fix from the same PR. It is the same
+  save-stack underflow that killed the process in 4.2.5 — do not reintroduce
+  a second blend pass over the hero.
+- **Upstream's history was not rewritten this time**, so no `git replace
+  --graft` workaround was needed; `merge-base` is `12492ba` as expected.
+- The stale `## Unreleased` section further down this file is upstream's
+  September 16 author-transition note and shipped in 4.1.0. Left untouched.
+
 ## [4.2.5] - 2026-10-01
 
 Third upstream sync from `Clash-Projects/LastWave-Native`, merging 10 commits
