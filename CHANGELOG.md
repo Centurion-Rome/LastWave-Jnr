@@ -59,6 +59,16 @@ commits, 66 files, +5836/-978.**
   icons instead of one shared treatment (upstream 5b709df).
 
 ### Fixed
+- **App missing from Settings → Special app access → Notification access.**
+  Commit `cff12ddc` had deleted `MediaScrobbleListenerService` (the
+  `NotificationListenerService`) along with its manifest declaration, and
+  `4e1bd34d` removed `ScrobbleDebugLog` it injects — so the merged APK
+  contained no listener service and Android hid the app from Notification
+  Access entirely, breaking media-session scrobbling. The service
+  declaration (`BIND_NOTIFICATION_LISTENER_SERVICE` +
+  `android.service.notification.NotificationListenerService` intent
+  filter) and both classes are restored byte-identical to upstream
+  `release/4.1.1`; no scrobbling logic was changed.
 - **Songs skipping out 3-4 seconds into a track** (upstream 0d53ccd). This was
   the most-reported symptom in the batch. `effectiveDuration` accepted the
   previously published duration as its last fallback, so on a track whose
