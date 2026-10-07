@@ -1,5 +1,54 @@
 # Changelog
 
+## [4.2.7] - 2026-10-07
+
+Fifth upstream sync from `Clash-Projects/LastWave-Native`, merging 72 commits
+(`e3bec2be`..`55b6bb89`) on top of the v4.2.6 fork point. **72 upstream
+commits, 11 conflicted files resolved.**
+
+### Added
+- **Discord Rich Presence** (upstream 4425d05, 7c54ca9). Shows what's playing
+  as Discord Rich Presence via pure AIDL IPC.
+- **Quick Access feed section** (upstream 64599b8). Ported quick access section
+  options, styling, and navigation.
+- **Stretchy artwork fade** (upstream bef22b9, 5a7fb6c). Responsive stretchy
+  artwork fade on Now Playing full bleed view.
+- **Audition stream hot-swap** (upstream d07518b). Seamless audition-backed
+  mid-track hot-swap.
+- **Lyricify Apple Music lyrics provider** (upstream 74311df, 8efb5cf). Integrated
+  with CI secrets.
+- **Kugou KRC lyrics sync** (upstream 29b7203). Restored Kugou KRC sync with
+  offset parsing, credit filtering, and whitespace token handling.
+
+### Changed
+- **Version bump** to 4.2.7 (versionCode 27).
+
+### Fixed
+- **Dolby Atmos playback** (upstream 911ae24, 21ca44d, d74f8f7). Restored Dolby
+  Atmos stream selection and decode capability detection.
+- **FLAC bit depth/rate display** (upstream c554d2b, 6339779). Retain full bit
+  depth and clock rate from addons on quality pill.
+- **Lyrics sync stability** (upstream b1abfaa, 52ce223, c6329da). 120fps lyrics
+  vsync rendering, lossless candidate matching, and playback stability.
+- **CSV import** (upstream def707d). Fixed CSV import parsing and prevented YouTube
+  song mismatches.
+- **DASH manifest parser** (upstream 0318e7c). Resilient XML attribute matching,
+  case-insensitive tag handling, and strict URL scheme checks.
+- **YouTube sign-in** (upstream 9f8ef7f). Hardened with cookie re-read backoff.
+- **Seekbar and lyrics** (upstream ac19d06, 97c68d5). Restored FLAC bit depth/rate
+  pill on all devices via STREAMINFO fallback; preserved 24-bit quality badge and
+  resolved seekbar stalls.
+- **Static cover art** (upstream e3bec2b). Prevented static cover art from bleeding
+  through translucent canvas.
+- **Feed author nullability** (upstream 0d642ea). Fixed null author handling.
+- **Quick Access order/icons** (upstream 63fbf24). Fixed Quick Access order/icons,
+  My Mix playback, lyrics native FPS.
+
+### Notes
+- **Conflict surface was 11 files.** All resolved to keep the fork's version (4.2.6→4.2.7)
+  and Jnr branding while accepting upstream's new features and fixes.
+- The fork's VU meter, DOWNLOADS tab, branding and reorder-lock all survived.
+
 ## [4.2.6] - 2026-10-03
 
 Fourth upstream sync from `Clash-Projects/LastWave-Native`, in two merges

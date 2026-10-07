@@ -2,7 +2,7 @@
 
 <img src="lastwave_logo.png" alt="LastWave Logo" width="120" height="120" style="border-radius: 50%;" />
 
-# LastWave-Jnr v4.2.6
+# LastWave-Jnr v4.2.7
 
 **High-Resolution Lossless Music Streaming & Player with Real-Time Synced Lyrics & Smart Discovery for Android, built with Material 3 Expressive design.**
  **Fork Highlight:** Based on [LastWave-Native](https://github.com/Clash-Projects/LastWave-Native) with added Analog VU meter and fixed offline Play functionality (which is still broken in original app).
@@ -17,7 +17,7 @@
     <img src="https://img.shields.io/badge/Download-APK--v1.1.0--Jnr-C6F100?style=for-the-badge&logo=android&logoColor=white&labelColor=012226" alt="Download APK" />
   </a>
   <a href="#">
-    <img src="https://img.shields.io/badge/Version-4.2.6--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 4.2.6-native" />
+    <img src="https://img.shields.io/badge/Version-4.2.7--native-C6F100?style=for-the-badge&labelColor=012226" alt="Version 4.2.7-native" />
     <img src="https://img.shields.io/badge/Scrobbler-Last.fm-D51007?style=for-the-badge&logo=lastdotfm&logoColor=white&labelColor=2d2d2d" alt="Last.fm Scrobbler" />
   </a>
   <a href="#">
@@ -82,7 +82,7 @@ Built with **Material 3 Expressive**, LastWave combines effortless ad-free strea
 ## <img src="https://api.iconify.design/lucide:rocket.svg?color=%23C6F100" width="20" height="20" align="center" /> Getting Started
 
 1. Download the latest APK from **[Releases](https://github.com/Centurion-Rome/LastWave-Jnr/releases)** or the **[Actions](https://github.com/Centurion-Rome/LastWave-Jnr/actions)** tab.
-2. Install `LastWave-Jnr-v4.2.6-release.apk` on your Android device (Android 7.0+).
+2. Install `LastWave-Jnr-v4.2.7-release.apk` on your Android device (Android 7.0+).
 3. Connect your Last.fm account to sync your scrobbles, taste profile, and discovery feed.
 4. Start streaming in bit-perfect lossless quality.
 
