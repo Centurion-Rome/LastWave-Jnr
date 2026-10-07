@@ -95,6 +95,7 @@ class SettingsViewModel @Inject constructor(
     private val downloadManager: TrackDownloadManager,
     private val fileExportHelper: FileExportHelper,
     private val scrobblerPreferences: ScrobblerPreferences,
+    private val discordPresencePreferences: com.lastwave.app.presence.DiscordPresencePreferences,
     private val equalizerPreferences: com.lastwave.app.data.local.EqualizerPreferences,
     private val loudnessPrefs: com.lastwave.app.playback.LoudnessPrefs,
     private val ytAuthManager: com.lastwave.app.data.ytmusic.YtMusicAuthManager,
@@ -131,6 +132,24 @@ class SettingsViewModel @Inject constructor(
     val syncedPlaylistIds: StateFlow<Set<Long>?> = ytMusicPreferences.syncedPlaylistIds
         .withSettingsFallback("YouTube playlist selection", null)
         .stateIn(viewModelScope, SettingsSharing, null)
+    /**
+     * Discord Rich Presence switch. Defaults ON (see
+     * [com.lastwave.app.presence.DiscordPresencePreferences.enabled]).
+     *
+     * No nudge to the publisher is needed: DiscordPresenceManager observes this
+     * very preference, so writing it evaluates presence against the current
+     * playback state immediately — the card is hidden or shown now, not at the
+     * next track change.
+     */
+    val discordPresenceEnabled: StateFlow<Boolean> = discordPresencePreferences.enabled
+        .withSettingsFallback("Discord presence preference", true)
+        .stateIn(viewModelScope, SettingsSharing, true)
+
+    fun setDiscordPresenceEnabled(enabled: Boolean) {
+        launchSettingsAction("update Discord presence") {
+            discordPresencePreferences.setEnabled(enabled)
+        }
+    }
     val ytAccountPlaylists = ytMusicLibraryManager.accountPlaylists
     val hiddenYtLibraryPlaylistIds: StateFlow<Set<String>> = ytMusicPreferences.hiddenLibraryPlaylistIds
         .withSettingsFallback("YouTube library visibility", emptySet())
@@ -429,7 +448,6 @@ class SettingsViewModel @Inject constructor(
     fun setPreferLosslessStreaming(enabled: Boolean) = launchSettingsAction("update streaming preference") { settingsPreferences.setPreferLosslessStreaming(enabled) }
     fun setLosslessQuality(quality: Int) = launchSettingsAction("update streaming quality") { settingsPreferences.setLosslessQuality(quality) }
     fun setDownloadQuality(quality: Int) = launchSettingsAction("update download quality") { settingsPreferences.setDownloadQuality(quality) }
-    fun setDolbyAtmosEnabled(enabled: Boolean) = launchSettingsAction("update Dolby Atmos preference") { settingsPreferences.setDolbyAtmosEnabled(enabled) }
     fun setStudioMasterClarity(enabled: Boolean) {
         // Apply immediately; DataStore persists the same state for future engine instances.
         launchSettingsAction("update Studio Master Clarity") {
@@ -439,6 +457,7 @@ class SettingsViewModel @Inject constructor(
                 // Enabling DSP clarity disables Bit-Perfect mode
                 settingsPreferences.setBitPerfectEnabled(false)
                 applyNativeAudio { it.setBitPerfect(false) }
+                com.lastwave.app.playback.usb.UsbExclusivePrefs.setEnabled(context, false)
             }
         }
     }
@@ -514,7 +533,7 @@ class SettingsViewModel @Inject constructor(
     fun setLyricsAnimation(animation: com.lastwave.app.data.local.LyricsAnimation) = launchSettingsAction("update lyrics animation") { settingsPreferences.setLyricsAnimation(animation) }
     fun setLyricsProvider(provider: com.lastwave.app.data.local.LyricsProvider) = launchSettingsAction("update lyrics provider") { settingsPreferences.setLyricsProvider(provider) }
     fun setLyricsOffsetMs(offsetMs: Long) = launchSettingsAction("update lyrics sync offset") {
-        settingsPreferences.setLyricsOffsetMs(offsetMs.coerceIn(-3000L, 3000L))
+        settingsPreferences.setLyricsOffsetMs(offsetMs.coerceIn(-10000L, 10000L))
     }
     fun setLyricsFontScale(scale: Float) = launchSettingsAction("update lyrics font scale") {
         settingsPreferences.setLyricsFontScale(scale)
@@ -653,11 +672,11 @@ class SettingsViewModel @Inject constructor(
     fun handleCsvPicked(uri: android.net.Uri) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                // Extract filename
-                val cursor = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-                val displayName = cursor?.use {
-                    if (it.moveToFirst()) it.getString(0) else null
-                } ?: "Imported Playlist"
+                val displayName = runCatching {
+                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                        if (it.moveToFirst()) it.getString(0) else null
+                    }
+                }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Playlist.csv"
 
                 val fileType = displayName.substringAfterLast('.', "File").uppercase()
                 _uiState.update { it.copy(toastMessage = "Matching and importing $fileType songs...") }

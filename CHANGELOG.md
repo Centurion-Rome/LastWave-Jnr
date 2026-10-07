@@ -346,6 +346,31 @@ than a normal fast-forward. See the merge commit `e383162` for the full breakdow
   `app/src/main/java/com/lastwave/app/data/addon/sedXzeBMg` was deleted.
 - The README screenshots still show the Jnr branding and VU meter; they have not been
   re-captured since the widget revamp and should be refreshed.
+## [4.2.4] - 2026-10-05
+
+### Added & Improved
+- **Resource Usage & Smooth UI:** Optimized rendering pipelines, reduced background resource contention, and smoothed UI interactions.
+- **Fast YouTube Search:** Restored instant 2-pass YouTube search resolution, eliminating multi-stage search fallback delays.
+- **Dolby Atmos Downloads:** Aligned spatial audio capability detection in `TrackDownloadManager` with `MusicPlayer`'s system `Spatializer` check, resolving Atmos download skips on Android 12L+ devices.
+- **DASH Manifest Parser Robustness:** Added resilient XML attribute matching, case-insensitive tag handling, and strict URL scheme checks to prevent malformed segment URLs during segmented downloads.
+- **Playback Warmup & Retry Gating:** Implemented first-song OPUS warmup and tap-to-retry gating to prevent premature auto-skips on transient stream hiccups.
+
+### Changed & Fixed
+- **Bit-Perfect Audio Issues:** Resolved bit-perfect DAC routing, format lockups, and hardware sample rate mismatches.
+- **Lyrics Sync:** Stabilized lyrics synchronization, eliminated drift, and improved word-by-word timing alignment.
+- **Stretchy Cover Arts:** Fixed stretchy full-bleed cover art visual artifacts, canvas fade transitions, and fluid backdrop rendering.
+- **Version Bump:** Bumped version to 4.2.4 (versionCode 24).
+
+## [4.2.3] - 2026-10-03
+
+### Added
+- **Stretchy Artwork Fade:** Implemented responsive stretchy artwork fade on Now Playing full bleed view, vertically stretching and smoothly dissolving into the dark backdrop with an offscreen gradient mask and dark scrim.
+- **Addon Bit Depth & Clock Rate Extraction:** Parsed bit depth and clock rate metadata across camelCase and snake_case properties from addons, preserving source-reported 24-bit depth on standard 44.1/48kHz tracks.
+
+### Changed & Fixed
+- **Settings Reorganization:** Relocated System Audio Effects from Appearance to Audio → Output & Loudness right beside Equalizer.
+- **Version Bump:** Bumped version to 4.2.3 (versionCode 23).
+>>>>>>> upstream/main
 
 ## [4.2.2] - 2026-09-27
 

@@ -296,6 +296,7 @@ class MusicPlayer @Inject constructor(
     private val playRequestGeneration = AtomicLong()
     private var activeUpgradeJob: Job? = null
     private var activeUpgradeDeferred: Deferred<ResolvedStream?>? = null
+    @Volatile private var swappingMediaId: String? = null
     private var queueEnrichmentJob: Job? = null
     private var preloadJob: Job? = null
     private var currentTrackCacheJob: Job? = null
@@ -307,6 +308,14 @@ class MusicPlayer @Inject constructor(
     private val radioUsedSeeds = ConcurrentHashMap.newKeySet<String>()
     private var unavailableSkipJob: Job? = null
     private val unavailableMediaIds = mutableSetOf<String>()
+    /**
+     * Consecutive failure count per mediaId for auto-skip gating. First
+     * transient failure (timeout, throttled OPUS URL, slow first resolve)
+     * holds with tap-to-retry; only proven-dead or repeatedly failing
+     * items auto-advance. Cleared on audible success / new queue.
+     * Main-thread only.
+     */
+    private val unavailableAttemptCounts = mutableMapOf<String, Int>()
     /**
      * Explicit listening history (mediaIdKeys, oldest first) so Previous
      * under shuffle returns the song actually heard. ExoPlayer's internal
@@ -475,20 +484,15 @@ class MusicPlayer @Inject constructor(
      * depth straight back, so the pill is correct from the first frame
      * regardless of cache-key bookkeeping.
      */
-    private var pendingQualityMediaId: String? = null
-    private var pendingQualityStream: ResolvedStream? = null
+    private val pendingQualities = ConcurrentHashMap<String, ResolvedStream>()
 
     private fun stagePendingQuality(mediaId: String, stream: ResolvedStream) {
-        pendingQualityMediaId = mediaId
-        pendingQualityStream = stream
+        pendingQualities[mediaId] = stream
     }
 
     /** Stashed stream for [mediaId], clearing the stash so it is used once. */
     private fun consumePendingQuality(mediaId: String): ResolvedStream? {
-        val staged = pendingQualityStream?.takeIf { pendingQualityMediaId == mediaId }
-        pendingQualityMediaId = null
-        pendingQualityStream = null
-        return staged
+        return pendingQualities.remove(mediaId)
     }
 
     /**
@@ -627,11 +631,26 @@ class MusicPlayer @Inject constructor(
             if (isPlaying) {
                 unavailableSkipJob?.cancel()
                 unavailableSkipJob = null
-                player.currentMediaItem?.mediaId?.let(unavailableMediaIds::remove)
+                player.currentMediaItem?.mediaId?.let {
+                    unavailableMediaIds.remove(it)
+                    unavailableAttemptCounts.remove(it)
+                }
             }
         }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (isCasting) return
+            // In-place quality swap replaces the playing item with the same
+            // song at the same position from a better source. It reports as
+            // a playlist change but is not the queue moving on: skip history,
+            // scrobble and re-resolve bookkeeping for it.
+            if ((reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED ||
+                 reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) &&
+                mediaItem?.mediaId != null &&
+                mediaItem.mediaId == swappingMediaId
+            ) {
+                swappingMediaId = null
+                return
+            }
             recordLocalListenSignal(reason)
             // Settle target or sanitize raw position from ExoPlayer
             val rawPos = player.currentPosition.coerceAtLeast(0L)
@@ -662,6 +681,12 @@ class MusicPlayer @Inject constructor(
                 // The stream we staged for this exact mediaId, if any. Taken
                 // before the reset so the badge survives it.
                 val stagedQuality = consumePendingQuality(mediaItem.mediaId)
+                    ?: currentTrack.mediaIdKey().let(::consumePendingQuality)
+                    ?: currentTrack.videoId?.let(::consumePendingQuality)
+                val stream = stagedQuality
+                    ?: mediaItem.localConfiguration?.customCacheKey?.let(preparedStreams::get)
+                    ?: preparedStreams.values.firstOrNull { it.url == mediaItem.localConfiguration?.uri?.toString() }
+                    ?: findPreparedStreamFor(currentTrack, currentTrack.videoId, currentTrack.mediaIdKey() in losslessBypassMediaIds)
                 _state.update {
                     it.copy(
                         current = currentTrack,
@@ -672,42 +697,36 @@ class MusicPlayer @Inject constructor(
                         queue = if (currentQueue.isNotEmpty()) currentQueue else it.queue,
                         isBuffering = true,
                         error = null,
-                        // New item owns its badge (same reason as the
-                        // resolveAndPlayQueueItem reset above). Only the
-                        // resolved stream can restore it: the decoder is no
-                        // longer allowed to invent a depth.
-                        audioCodec = null,
-                        bitrateKbps = null,
-                        isLossless = false,
-                        bitDepth = null,
-                        samplingRateKHz = null,
+                        audioCodec = stream?.audioCodec,
+                        bitrateKbps = stream?.bitrateKbps,
+                        isLossless = stream?.isLossless == true,
+                        bitDepth = stream?.bitDepth,
+                        samplingRateKHz = if (isSpatialAudioCodec(stream?.audioCodec)) 48.0 else stream?.samplingRateKHz,
                     )
                 }
                 decodedSampleRateHz = 0
-                (stagedQuality ?: mediaItem.localConfiguration
-                    ?.customCacheKey
-                    ?.let(preparedStreams::get))
-                    ?.let { stream ->
-                        publishResolvedQuality(stream, expectedMediaId = mediaItem.mediaId)
-                        applyDacRoutingFor(dacRateFor(stream), stream.audioCodec)
-                        if (!stream.isLossless && stream.audioCodec != "DOLBY ATMOS") {
-                            scheduleQualityUpgrade(
-                                track = currentTrack,
-                                expectedMediaId = mediaItem.mediaId,
-                                generation = playRequestGeneration.get(),
-                                currentStream = stream,
-                            )
-                        }
-                    } ?: run {
-                        applyDacRoutingFor(currentSourceRateHz())
+                stream?.let { s ->
+                    publishResolvedQuality(s, expectedMediaId = mediaItem.mediaId)
+                    applyDacRoutingFor(dacRateFor(s), s.audioCodec)
+                    if (!s.isLossless && s.audioCodec != "DOLBY ATMOS") {
+                        scheduleQualityUpgrade(
+                            track = currentTrack,
+                            expectedMediaId = mediaItem.mediaId,
+                            generation = playRequestGeneration.get(),
+                            currentStream = s,
+                        )
                     }
+                } ?: run {
+                    applyDacRoutingFor(currentSourceRateHz())
+                }
                 if (outgoingPlayer == null) cancelCrossfade()
                 // Queue placeholders are intentionally non-playable until
                 // their signed stream has been resolved. Resolve an item
                 // before Media3 can attempt to open its lastwave:// URI.
-                val prepared = mediaItem.localConfiguration
-                    ?.customCacheKey
-                    ?.let(preparedStreams::get)
+                val prepared = stream
+                    ?: mediaItem.localConfiguration?.customCacheKey?.let(preparedStreams::get)
+                    ?: preparedStreams.values.firstOrNull { it.url == mediaItem.localConfiguration?.uri?.toString() }
+                    ?: findPreparedStreamFor(currentTrack, currentTrack.videoId, currentTrack.mediaIdKey() in losslessBypassMediaIds)
                 if (mediaItem.localConfiguration?.uri?.scheme == "lastwave" || prepared?.isExpired() == true) {
                     // During lazy-player construction a restored queue is
                     // installed before the lazy value is published. Defer
@@ -927,6 +946,10 @@ class MusicPlayer @Inject constructor(
                 val preparedHit = findPreparedStreamFor(track, videoId, bypassLossless)
                 if (preparedHit != null) {
                     android.util.Log.i("MusicPlayer", "[MEDIA3] loader prepared-hit '${track.title}' key=${preparedHit.cacheKey}")
+                    applicationScope.launch(Dispatchers.Main.immediate) {
+                        stagePendingQuality(track.mediaIdKey(), preparedHit)
+                        track.videoId?.let { stagePendingQuality(it, preparedHit) }
+                    }
                     preparedHit
                 } else {
                     runCatching {
@@ -936,6 +959,8 @@ class MusicPlayer @Inject constructor(
                                 android.util.Log.i("MusicPlayer", "[MEDIA3] loader resolved '${track.title}' key=${resolved.cacheKey} codec=${resolved.audioCodec}")
                                 applicationScope.launch(Dispatchers.Main.immediate) {
                                     registerPreparedStream(resolved)
+                                    stagePendingQuality(track.mediaIdKey(), resolved)
+                                    track.videoId?.let { stagePendingQuality(it, resolved) }
                                     val isCurrentlyPlaying = track.mediaIdKey() == _state.value.current?.mediaIdKey()
                                     if (isCurrentlyPlaying) {
                                         publishResolvedQuality(resolved, expectedMediaId = track.mediaIdKey())
@@ -1064,7 +1089,7 @@ class MusicPlayer @Inject constructor(
                             }
                     }
                     val isSpatial = isSpatialAudioCodec(_state.value.audioCodec)
-                    sink.setBitPerfectRequested(!isSpatial && (bitPerfectEnabled || usbExclusivePrefEnabled))
+                    sink.setBitPerfectRequested(!isSpatial && bitPerfectEnabled)
                     sink.syncExclusiveUsb(handleAudioFocus && exclusiveUsbWanted())
                     audioSinks.add(sink)
                     runCatching {
@@ -1200,10 +1225,15 @@ class MusicPlayer @Inject constructor(
                             // retriever is used, through the shared hi-res rule
                             // (a rate above 48kHz is 24-bit in practice, so a
                             // reported 16 is corrected there).
-                            val sourceDepth = resolveDepthForDisplay(
-                                updated.bitDepth,
-                                updated.samplingRateKHz ?: (if (rateHz > 0) rateHz / 1000.0 else null),
-                            )
+                            val manifestDepth = player.currentMediaItem?.localConfiguration?.customCacheKey
+                                ?.let(preparedStreams::get)?.url
+                                ?.let { runCatching { renditionDepthFromStreamUrl(it) }.getOrNull() }
+                            val sourceDepth = manifestDepth
+                                ?: resolveDepthForDisplay(
+                                    updated.bitDepth,
+                                    updated.samplingRateKHz ?: (if (rateHz > 0) rateHz / 1000.0 else null),
+                                ) ?: parseQualityFromCodec(updated.audioCodec)?.substringBefore('/')?.toIntOrNull()
+                              ?: if ((detectedCodec == "FLAC" || updated.isLossless) && rateHz > 48_000) 24 else null
                             if (isSpatialAudioCodec(detectedCodec)) {
                                 updated = updated.copy(audioCodec = detectedCodec, isLossless = false)
                             } else if (!isSpatialAudioCodec(updated.audioCodec) && detectedCodec != null) {
@@ -1216,14 +1246,21 @@ class MusicPlayer @Inject constructor(
                                         ((sourceDepth ?: 0) > 16 || rateHz > 48_000) -> "HI-RES FLAC"
                                     else -> detectedCodec
                                 }
-                                val finalCodec = if (currentIsExplicit && updated.audioCodec != "FLAC" && updated.audioCodec != "HI-RES FLAC" && updated.audioCodec != "LOSSLESS") {
+                                val finalCodec = if (detectedCodec == "FLAC") {
+                                    if (detectedBadge == "FLAC" && currentIsExplicit && updated.audioCodec?.contains("/") == true) {
+                                        updated.audioCodec
+                                    } else {
+                                        detectedBadge
+                                    }
+                                } else if (currentIsExplicit && updated.audioCodec != "FLAC" && updated.audioCodec != "HI-RES FLAC" && updated.audioCodec != "LOSSLESS") {
                                     updated.audioCodec
                                 } else {
                                     detectedBadge
                                 }
                                 updated = updated.copy(
                                     audioCodec = finalCodec,
-                                    bitrateKbps = updated.bitrateKbps ?: bitrate ?: if (detectedCodec == "OPUS") 160 else null,
+                                    bitDepth = manifestDepth ?: updated.bitDepth ?: sourceDepth,
+                                    bitrateKbps = if (detectedCodec == "FLAC") (updated.bitrateKbps ?: bitrate) else (updated.bitrateKbps ?: bitrate ?: if (detectedCodec == "OPUS") 160 else null),
                                     isLossless = detectedCodec == "FLAC",
                                 )
                             }
@@ -1371,7 +1408,7 @@ class MusicPlayer @Inject constructor(
                             updateCrossfade(player.currentPosition.coerceAtLeast(0L))
                             cadenceMs = 50L
                         }
-                        if (!isCurrentMediaMatch(player, _state.value.current)) {
+                        if (!isCurrentMediaMatch(player, _state.value.current) && !player.isPlaying) {
                             _state.update { it.copy(sleepTimerRemainingMs = remaining?.coerceAtLeast(0)) }
                             cadenceMs = 60L
                         } else {
@@ -1568,6 +1605,13 @@ class MusicPlayer @Inject constructor(
                     // Freshly engaged: ask for direct USB access right away so
                     // the DAC route is usable without hunting for the dialog.
                     maybeRequestUsbPermission()
+                } else if (!bitPerfectEnabled) {
+                    if (usbExclusivePrefEnabled) {
+                        usbExclusivePrefEnabled = false
+                    }
+                    applicationScope.launch {
+                        runCatching { UsbExclusivePrefs.setEnabled(appContext, false) }
+                    }
                 }
                 onMain {
                     applyDacRoutingFor(currentSourceRateHz())
@@ -1594,7 +1638,7 @@ class MusicPlayer @Inject constructor(
 
         applicationScope.launch {
             usbDacMonitor.state.collect {
-                if (bitPerfectEnabled || usbExclusivePrefEnabled) {
+                if (bitPerfectEnabled && usbExclusivePrefEnabled) {
                     maybeRequestUsbPermission()
                 }
                 onMain {
@@ -1606,8 +1650,8 @@ class MusicPlayer @Inject constructor(
 
         applicationScope.launch {
             UsbExclusivePrefs.enabledFlow(appContext).collect { enabled ->
-                usbExclusivePrefEnabled = enabled
-                if (enabled) maybeRequestUsbPermission()
+                usbExclusivePrefEnabled = enabled && bitPerfectEnabled
+                if (usbExclusivePrefEnabled) maybeRequestUsbPermission()
                 onMain {
                     applyDacRoutingFor(currentSourceRateHz())
                     updateSignalPath()
@@ -1633,6 +1677,7 @@ class MusicPlayer @Inject constructor(
         queueEnrichmentJob?.cancel()
         unavailableSkipJob?.cancel()
         unavailableMediaIds.clear()
+        unavailableAttemptCounts.clear()
         playHistory.clear()
         latePreloadKey = null
         lastPreloadRetryMs = 0L
@@ -1682,11 +1727,22 @@ class MusicPlayer @Inject constructor(
         queueEnrichmentJob?.cancel()
         unavailableSkipJob?.cancel()
         unavailableMediaIds.clear()
+        unavailableAttemptCounts.clear()
         // Fresh queue context: previous-queue history no longer applies.
         // (Same-queue navigations via startResolvedQueuePlayback keep it.)
         playHistory.clear()
         latePreloadKey = null
         lastPreloadRetryMs = 0L
+        // Queue-set warmup: kick the selected YouTube resolve in parallel so
+        // startResolvedQueuePlayback below hits the shared request / stream
+        // cache instead of cold-starting webConfig + BotGuard on first tap.
+        // Fire-and-forget; the real resolve below coalesces via
+        // activeStreamRequests / resolutionRequests.
+        tracks.getOrNull(selectedIndex)?.videoId?.takeIf(String::isNotBlank)?.let { warmVideoId ->
+            applicationScope.launch(Dispatchers.IO) {
+                runCatching { innerTube.resolveAudioStream(warmVideoId) }
+            }
+        }
 
         startResolvedQueuePlayback(
             tracks = tracks,
@@ -1879,7 +1935,24 @@ class MusicPlayer @Inject constructor(
                 }
                 withContext(Dispatchers.Main.immediate) {
                     if (generation == playRequestGeneration.get()) {
-                        unavailableMediaIds += selectedTrack.mediaIdKey()
+                        val failedKey = selectedTrack.mediaIdKey()
+                        val attempts = (unavailableAttemptCounts[failedKey] ?: 0) + 1
+                        unavailableAttemptCounts[failedKey] = attempts
+                        val provenDead = isExplicitlyUnplayableFailure(error) || isUnsupportedMediaFailure(error)
+                        if (!provenDead && attempts < MIN_UNAVAILABLE_ATTEMPTS_BEFORE_SKIP) {
+                            val isOffline = isNetworkException(error)
+                            _state.update {
+                                it.copy(
+                                    isPlaying = false,
+                                    isBuffering = false,
+                                    error = if (isOffline) "Track not available offline"
+                                    else error.message?.takeIf(String::isNotBlank)
+                                        ?: "Couldn't load this track. Tap play to retry.",
+                                )
+                            }
+                            return@withContext
+                        }
+                        unavailableMediaIds += failedKey
                         val nextIndex = if (startShuffled) {
                             tracks.indices
                                 .filter { tracks[it].mediaIdKey() !in unavailableMediaIds }
@@ -2166,6 +2239,15 @@ class MusicPlayer @Inject constructor(
     private fun isCurrentMediaMatch(player: Player, expected: PlayableTrack?): Boolean {
         if (expected == null) return false
         val currentItem = runCatching { player.currentMediaItem }.getOrNull() ?: return false
+
+        // Actively rendering audio is the authoritative source of playback truth
+        if (player.isPlaying) return true
+
+        val currentIndex = runCatching { player.currentMediaItemIndex }.getOrNull() ?: -1
+        if (currentIndex >= 0 && currentIndex == _state.value.currentIndex && currentIndex in 0 until player.mediaItemCount) {
+            return true
+        }
+
         val itemMediaId = currentItem.mediaId
         val expectedKey = expected.mediaIdKey()
         if (itemMediaId == expectedKey) return true
@@ -2184,10 +2266,16 @@ class MusicPlayer @Inject constructor(
             if (uriStr == expectedPlaybackUrl || uriStr == "file://$expectedPlaybackUrl") return true
         }
 
-        val itemTitle = currentItem.mediaMetadata.title?.toString()
-        val itemArtist = currentItem.mediaMetadata.artist?.toString()
-        if (!itemTitle.isNullOrBlank() && itemTitle.equals(expected.title, ignoreCase = true)) {
-            if (itemArtist.isNullOrBlank() || expected.artist.isBlank() || itemArtist.equals(expected.artist, ignoreCase = true)) {
+        val itemTitle = currentItem.mediaMetadata.title?.toString()?.trim()
+        val itemArtist = currentItem.mediaMetadata.artist?.toString()?.trim()
+        val expectedTitle = expected.title.trim()
+        val expectedArtist = expected.artist.trim()
+        if (!itemTitle.isNullOrBlank() && itemTitle.equals(expectedTitle, ignoreCase = true)) {
+            if (itemArtist.isNullOrBlank() || expectedArtist.isBlank() ||
+                itemArtist.equals(expectedArtist, ignoreCase = true) ||
+                itemArtist.contains(expectedArtist, ignoreCase = true) ||
+                expectedArtist.contains(itemArtist, ignoreCase = true)
+            ) {
                 return true
             }
         }
@@ -2230,7 +2318,7 @@ class MusicPlayer @Inject constructor(
         }
         if (!exclusiveUsbOutput.isActive() && playerDelegate.isInitialized()) {
             val playbackState = player.playbackState
-            val currentMediaMatch = isCurrentMediaMatch(player, _state.value.current)
+            val currentMediaMatch = isCurrentMediaMatch(player, _state.value.current) || player.isPlaying
             if (currentMediaMatch && (playbackState == Player.STATE_READY || playbackState == Player.STATE_BUFFERING)) {
                 val exoPos = player.currentPosition.coerceAtLeast(0L)
                 if (playbackState == Player.STATE_BUFFERING && playheadPosMs == 0L && exoPos > 1_500L) {
@@ -2392,9 +2480,13 @@ class MusicPlayer @Inject constructor(
             if (progress >= 1f || outgoing.playbackState == Player.STATE_ENDED || outgoing.playerError != null) {
                 cancelCrossfade()
             } else {
-                val angle = progress * (Math.PI / 2.0)
-                player.volume = kotlin.math.sin(angle).toFloat()
-                outgoing.volume = kotlin.math.cos(angle).toFloat()
+                // Perceptual fade: outgoing ramps down, incoming ramps up.
+                // Equal-power sin/cos kept both near full level for most of
+                // the window, which sounded like two songs mixed together.
+                val outGain = (1f - progress) * (1f - progress)
+                val inGain = progress * progress
+                player.volume = inGain
+                outgoing.volume = outGain
                 outgoing.playWhenReady = player.isPlaying
             }
             return false
@@ -2456,7 +2548,18 @@ class MusicPlayer @Inject constructor(
         )
 
         when (plan) {
-            is CrossfadeDecision.Idle -> return false
+            // Idle carries the blocking gate (disabled/bit-perfect/paused/no-next/
+            // too-early/...). It used to return silently, which made a missed fade
+            // indistinguishable from a disabled one in logcat; rate-limited here
+            // so the 60ms ticker cannot flood.
+            is CrossfadeDecision.Idle -> {
+                logCrossfadeDecision(
+                    "idle-${plan.reason.name.lowercase()}",
+                    "remaining=${timingDurationMs - livePosMs}ms hasNext=$hasNext " +
+                        "armed=$armedForNext ready=${standby?.playbackState == Player.STATE_READY}",
+                )
+                return false
+            }
 
             is CrossfadeDecision.ResolveNext -> {
                 // Unresolved or dead-signed next item. Refreshing early
@@ -2656,7 +2759,7 @@ class MusicPlayer @Inject constructor(
      * No peripheral / already granted / toggle off = silent no-op.
      */
     private fun maybeRequestUsbPermission() {
-        if (!bitPerfectEnabled && !usbExclusivePrefEnabled) return
+        if (!bitPerfectEnabled || !usbExclusivePrefEnabled) return
         val dac = usbDacMonitor.state.value.dac ?: run {
             usbPermissionPromptedKey = null
             return
@@ -2685,7 +2788,7 @@ class MusicPlayer @Inject constructor(
     private fun exclusiveUsbWanted(): Boolean {
         if (isCasting) return false
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return false
-        if (!bitPerfectEnabled && !usbExclusivePrefEnabled) return false
+        if (!bitPerfectEnabled || !usbExclusivePrefEnabled) return false
         // E-AC-3 JOC / 360 RA is multichannel. Exclusive USB is stereo PCM
         // only — keep Android's decoder+mixer so Atmos actually plays.
         if (isSpatialAudioCodec(_state.value.audioCodec)) return false
@@ -2699,25 +2802,35 @@ class MusicPlayer @Inject constructor(
      *  spatial manifests that ExoPlayer then choked on (3003 → retry loop →
      *  "Playback interrupted") instead of dropping to stereo. */
     private val isAtmosDecoderAvailable: Boolean by lazy {
-        runCatching {
-            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val platform = runCatching {
+            val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
             codecList.codecInfos.any { info ->
                 !info.isEncoder && info.supportedTypes.any { type ->
-                    type.equals("audio/eac3-joc", ignoreCase = true)
+                    type.equals("audio/eac3-joc", ignoreCase = true) ||
+                        type.equals("audio/eac3", ignoreCase = true) ||
+                        type.equals("audio/ac3", ignoreCase = true)
                 }
             }
         }.getOrDefault(false)
+        // Bundled FFmpeg decodes the E-AC-3 core of JOC streams on any device.
+        val ffmpeg = runCatching {
+            androidx.media3.decoder.ffmpeg.FfmpegLibrary.isAvailable() &&
+                androidx.media3.decoder.ffmpeg.FfmpegLibrary.supportsFormat(MimeTypes.AUDIO_E_AC3)
+        }.getOrDefault(false)
+        android.util.Log.i("MusicPlayer", "[ATMOS] decoder availability platform=$platform ffmpeg=$ffmpeg")
+        platform || ffmpeg
     }
 
     fun isSpatialAudioSupportedOnDevice(): Boolean {
+        if (isAtmosDecoderAvailable) return true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2) {
-            val am = audioManager ?: return isAtmosDecoderAvailable
+            val am = audioManager ?: return false
             val spatializer = am.spatializer
             if (spatializer.isAvailable || spatializer.isEnabled) {
                 return true
             }
         }
-        return isAtmosDecoderAvailable
+        return false
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.S_V2)
@@ -2774,7 +2887,7 @@ class MusicPlayer @Inject constructor(
         val exclusiveWanted = exclusiveUsbWanted()
         exclusiveUsbOutput.setWanted(exclusiveWanted)
         audioSinks.forEach { sink ->
-            sink.setBitPerfectRequested(!isSpatial && (bitPerfectEnabled || exclusiveWanted))
+            sink.setBitPerfectRequested(!isSpatial && bitPerfectEnabled)
             sink.syncExclusiveUsb(exclusiveWanted)
         }
         val exclusive = exclusiveUsbOutput.isActive()
@@ -2824,7 +2937,7 @@ class MusicPlayer @Inject constructor(
         )
         usbDacMonitor.setRouteRequested(exclusive || device != null)
         exclusiveUsbOutput.syncListeningGain()
-        manageDacSystemVolume(!isSpatial && (bitPerfectEnabled || exclusiveWanted))
+        manageDacSystemVolume(!isSpatial && bitPerfectEnabled)
         updateSystemEffectsState()
     }
 
@@ -3320,7 +3433,10 @@ class MusicPlayer @Inject constructor(
         unavailableSkipJob?.cancel()
         unavailableSkipJob = null
         val mediaItem = player.getMediaItemAt(index)
+        val track = mediaItem.toPlayableTrack()
         val prepared = mediaItem.localConfiguration?.customCacheKey?.let(preparedStreams::get)
+            ?: preparedStreams.values.firstOrNull { it.url == mediaItem.localConfiguration?.uri?.toString() }
+            ?: findPreparedStreamFor(track, track.videoId, track.mediaIdKey() in losslessBypassMediaIds)
         if (mediaItem.localConfiguration?.uri?.scheme != "lastwave" && prepared?.isExpired() != true) {
             // Already resolved: publish quality synchronously so the badge is
             // correct from the first frame (no transition may fire for a
@@ -3329,6 +3445,8 @@ class MusicPlayer @Inject constructor(
             // clears these very fields.
             prepared?.let { stream ->
                 stagePendingQuality(mediaItem.mediaId, stream)
+                stagePendingQuality(track.mediaIdKey(), stream)
+                track.videoId?.let { stagePendingQuality(it, stream) }
                 publishResolvedQuality(stream, expectedMediaId = mediaItem.mediaId)
             }
             takeOverPlayback(index, mediaItem.mediaId)
@@ -3336,7 +3454,6 @@ class MusicPlayer @Inject constructor(
             return
         }
 
-        val track = mediaItem.toPlayableTrack()
         val expectedMediaId = mediaItem.mediaId
         resetPlayhead(0L, expectedMediaId)
         resolvingMediaIds[expectedMediaId] = generation
@@ -3390,6 +3507,8 @@ class MusicPlayer @Inject constructor(
                     // seek hands the resolved depth straight back instead of
                     // blanking the pill.
                     stagePendingQuality(expectedMediaId, resolved)
+                    stagePendingQuality(track.mediaIdKey(), resolved)
+                    track.videoId?.let { stagePendingQuality(it, resolved) }
                     publishResolvedQuality(resolved, expectedMediaId = expectedMediaId)
                     applyDacRoutingFor(dacRateFor(resolved))
                     logStreamEvent("queue-prepare", resolved, retry = 0)
@@ -3431,6 +3550,8 @@ class MusicPlayer @Inject constructor(
                             }
                             registerPreparedStream(ytFallback)
                             stagePendingQuality(expectedMediaId, ytFallback)
+                            stagePendingQuality(track.mediaIdKey(), ytFallback)
+                            track.videoId?.let { stagePendingQuality(it, ytFallback) }
                             publishResolvedQuality(ytFallback, expectedMediaId = expectedMediaId)
                             applyDacRoutingFor(dacRateFor(ytFallback))
                             logStreamEvent("queue-prepare-yt-fallback", ytFallback, retry = 0)
@@ -3860,6 +3981,8 @@ class MusicPlayer @Inject constructor(
                     return@withContext false
                 }
                 registerPreparedStream(resolved)
+                stagePendingQuality(queuedTrack.mediaIdKey(), resolved)
+                queuedTrack.videoId?.let { stagePendingQuality(it, resolved) }
                 replaceMediaItemPreservingShuffle(nextIndex, queuedTrack.toMediaItem(resolved))
                 logStreamEvent("next-prepared", resolved, retry = 0)
                 true
@@ -4753,6 +4876,26 @@ class MusicPlayer @Inject constructor(
             return
         }
         if (failedIndex == C.INDEX_UNSET || failedMediaId == null) return
+        // No premature 1-2s skip: first transient failure holds with
+        // tap-to-retry; only proven-dead or repeatedly failing items
+        // auto-advance. Player-error retries already exhausted
+        // MAX_PLAYBACK_RETRIES before reaching here, so they skip at once.
+        val provenDead = isExplicitlyUnplayableFailure(failure) || isUnsupportedMediaFailure(failure)
+        val attempts = (unavailableAttemptCounts[failedMediaId] ?: 0) + 1
+        unavailableAttemptCounts[failedMediaId] = attempts
+        val alreadyRetriedExhaustively = errorRetryCount >= MAX_PLAYBACK_RETRIES
+        if (!provenDead && !alreadyRetriedExhaustively && attempts < MIN_UNAVAILABLE_ATTEMPTS_BEFORE_SKIP) {
+            player.pause()
+            _state.update {
+                it.copy(
+                    isPlaying = false,
+                    isBuffering = false,
+                    error = failure.message?.takeIf(String::isNotBlank)
+                        ?: "Couldn't load this track. Tap play to retry.",
+                )
+            }
+            return
+        }
         unavailableSkipJob?.cancel()
         unavailableSkipJob = applicationScope.launch(Dispatchers.Main.immediate) {
             yield()
@@ -4940,6 +5083,26 @@ class MusicPlayer @Inject constructor(
                 }
             } finally {
                 retriever.release()
+            }
+        }
+        // FLAC STREAMINFO fallback: device- and API-independent ground truth.
+        // The retriever keys above need API 31+ and still return null on
+        // several OEMs/files, which left bitDepth null and the pill stuck at
+        // rate-only ("44.1kHz FLAC"). The header parse works on every device.
+        if ((mime.contains("flac") || (uri.path ?: targetUrl).endsWith(".flac", ignoreCase = true)) &&
+            (bitDepth == null || samplingRateKHz == null)
+        ) {
+            runCatching {
+                val header: FlacStreamInfo? = if (targetUrl.startsWith("content://")) {
+                    appContext.contentResolver.openInputStream(uri)?.use { readFlacStreamInfo(it) }
+                } else {
+                    val path = uri.path ?: targetUrl.removePrefix("file://")
+                    java.io.File(path).takeIf { it.isFile && it.canRead() }?.inputStream()?.use { readFlacStreamInfo(it) }
+                }
+                if (header != null) {
+                    if (bitDepth == null) bitDepth = header.bitDepth?.takeIf { it > 0 }
+                    if (samplingRateKHz == null) header.sampleRateHz?.takeIf { it > 0 }?.let { samplingRateKHz = it / 1000.0 }
+                }
             }
         }
 
@@ -5434,7 +5597,7 @@ class MusicPlayer @Inject constructor(
         losslessBudget: LosslessBudget = LosslessBudget.Interactive,
     ): ResolvedStream = withContext(Dispatchers.IO) {
         val misc = runCatching { settingsPreferences.settings.first() }.getOrDefault(MiscSettings())
-        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, misc.preferProviderModules, excludedLosslessUrls, allowLocalDownloads, losslessBudget)
+        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.preferLosslessStreaming, misc.preferProviderModules, excludedLosslessUrls, allowLocalDownloads, losslessBudget)
         val now = SystemClock.elapsedRealtime()
         resolutionRequests.entries.removeIf { now - it.value.first > 60_000L }
         if (resolutionRequests.size >= 64) {
@@ -5551,24 +5714,12 @@ class MusicPlayer @Inject constructor(
                 android.util.Log.i("MusicPlayer", "[PLAYBACK] local-download hit for '${track.title}' key=${localStream.cacheKey}")
                 localStream
             } else {
-                val isDolbyPreferred = misc.dolbyAtmosEnabled || misc.losslessQuality == LosslessMusicApi.QUALITY_DOLBY_ATMOS
-                val losslessTimeoutMs = if (isDolbyPreferred) {
-                    if (!videoId.isNullOrBlank()) 10_000L else 12_000L
-                } else {
-                    if (!videoId.isNullOrBlank()) 3_500L else 4_500L
-                }
-                val losslessBudgetMs = (losslessTimeoutMs - (SystemClock.elapsedRealtime() - forkStart)).coerceAtLeast(0L)
-                // Unbounded skips the deadline entirely rather than passing
-                // Long.MAX_VALUE to withTimeoutOrNull, whose deadline
-                // computation would overflow.
                 val losslessStream: ResolvedStream? = if (losslessDeferred.isCompleted) {
                     runCatching { losslessDeferred.await() }.getOrNull()
                 } else if (losslessBudget == LosslessBudget.Unbounded) {
                     runCatching { losslessDeferred.await() }.getOrNull()
-                } else if (losslessBudgetMs <= 0L) {
-                    null
                 } else {
-                    withTimeoutOrNull(losslessBudgetMs) {
+                    withTimeoutOrNull(2000L) {
                         runCatching { losslessDeferred.await() }.getOrNull()
                     }
                 }
@@ -5577,7 +5728,7 @@ class MusicPlayer @Inject constructor(
                     youtubeDeferred.cancel()
                     android.util.Log.i(
                         "MusicPlayer",
-                        "[PLAYBACK] Lossless stream resolved for '${track.title}' (${SystemClock.elapsedRealtime() - forkStart}ms); locking playback pipeline to ${losslessStream.audioCodec}",
+                        "[PLAYBACK] Lossless stream resolved for '${track.title}' (${SystemClock.elapsedRealtime() - forkStart}ms); playing ${losslessStream.audioCodec}",
                     )
                     losslessStream
                 } else {
@@ -5590,7 +5741,7 @@ class MusicPlayer @Inject constructor(
                         ?: resolveYoutubeTrackAudioStream(track, null)
                     android.util.Log.i(
                         "MusicPlayer",
-                        "[PLAYBACK] YouTube stream resolved for '${track.title}' (${SystemClock.elapsedRealtime() - forkStart}ms); locking playback pipeline to ${ytStream.audioCodec}",
+                        "[PLAYBACK] YouTube stream resolved for '${track.title}' (${SystemClock.elapsedRealtime() - forkStart}ms); playing ${ytStream.audioCodec}, background lossless upgrade pending",
                     )
                     ytStream
                 }
@@ -5611,23 +5762,13 @@ class MusicPlayer @Inject constructor(
         expectedDurationSeconds: Int? = null,
     ): ResolvedStream? {
         val atmosSupported = isSpatialAudioSupportedOnDevice()
-        val effectiveQuality = if (misc.dolbyAtmosEnabled && atmosSupported) {
-            LosslessMusicApi.QUALITY_DOLBY_ATMOS
+        // Atmos plays only when explicitly selected (quality 28) AND the device
+        // can render it. No toggle, no auto-upgrade: any other tier never becomes Atmos.
+        // An Atmos request on an incapable device falls back to hi-res stereo.
+        val effectiveQuality = if (misc.losslessQuality == LosslessMusicApi.QUALITY_DOLBY_ATMOS && !atmosSupported) {
+            LosslessMusicApi.QUALITY_MAX_HI_RES
         } else {
-            if (misc.dolbyAtmosEnabled && !atmosSupported) {
-                android.util.Log.w(
-                    "MusicPlayer",
-                    "Dolby Atmos enabled in settings, but device lacks spatial/Dolby decoding capabilities; falling back to lossless stereo tier",
-                )
-            }
-            // If the user's lossless quality is also set to Atmos but the
-            // device can't play it, demote to hi-res stereo so the addon
-            // waterfall skips the spatial tier entirely.
-            if (!atmosSupported && misc.losslessQuality == LosslessMusicApi.QUALITY_DOLBY_ATMOS) {
-                LosslessMusicApi.QUALITY_MAX_HI_RES
-            } else {
-                misc.losslessQuality
-            }
+            misc.losslessQuality
         }
         val stream = losslessMusicApi.resolveStream(
             title = track.title,
@@ -5644,7 +5785,14 @@ class MusicPlayer @Inject constructor(
         val manifestIsLossy = manifestCodec?.let {
             it.contains("opus") || it.contains("mp4a") || it.contains("aac") || it.contains("mp3")
         } == true
-        val isLossless = !manifestIsLossy &&
+        val manifestIsSpatial = manifestCodec?.let {
+            it.contains("ec-3") || it.contains("eac3") || it.contains("ac-3") ||
+                it.contains("mha1") || it.contains("mhm1")
+        } == true
+        // Immersive mixes are premium but never bit-exact: exclude them
+        // from the lossless flag even though their carrier is not lossy.
+        val isLossless = !manifestIsLossy && !manifestIsSpatial &&
+            stream.formatId != LosslessMusicApi.QUALITY_DOLBY_ATMOS &&
             stream.formatId != LosslessMusicApi.QUALITY_MP3_320 &&
             stream.formatId != LosslessMusicApi.QUALITY_DATA_SAVER &&
             !stream.mimeType.contains("mp3", ignoreCase = true) &&
@@ -5662,13 +5810,13 @@ class MusicPlayer @Inject constructor(
             else -> null
         }
         val effectiveRate = if (stream.samplingRate > 1000.0) stream.samplingRate / 1000.0 else stream.samplingRate
-        // Depth the stream reported, through the shared hi-res rule: a rate
-        // above 48kHz is 24-bit in practice, so a reported 16 there is
-        // corrected to 24 instead of shown as 16. At or below 48kHz nothing
-        // is assumed — an unknown depth stays unknown rather than claiming 24
-        // from the rate alone. The decoder's PCM encoding is not consulted at
-        // all; it describes the decoder's output, not the song.
-        val resolvedBitDepth: Int? = resolveDepthForDisplay(stream.bitDepth.takeIf { it > 0 }, effectiveRate)
+        // Unknown depth stays unknown at ≤48kHz (renders rate-only, honest).
+        // Only a hi-res rate implies 24-bit; never invent 16.
+        val streamBitDepth = stream.bitDepth.takeIf { it > 0 }
+            ?: if (isLossless && effectiveRate > 48.0) 24 else null
+        val resolvedBitDepth: Int? = resolveDepthForDisplay(streamBitDepth, effectiveRate)
+            ?: parseQualityFromCodec(stream.audioCodecOverride)?.substringBefore('/')?.toIntOrNull()
+            ?: streamBitDepth
         val badge = when {
             stream.audioCodecOverride != null -> stream.audioCodecOverride
             // Spatial badges only from manifest evidence: the request's
@@ -5681,7 +5829,7 @@ class MusicPlayer @Inject constructor(
             (resolvedBitDepth ?: 0) > 16 || effectiveRate > 48.0 -> "HI-RES FLAC"
             stream.formatId == LosslessMusicApi.QUALITY_MP3_320 -> "MP3 320k"
             stream.formatId == LosslessMusicApi.QUALITY_DATA_SAVER -> "HE-AAC"
-            else -> "LOSSLESS"
+            else -> if ((resolvedBitDepth ?: 0) > 0 && effectiveRate > 0.0) "$resolvedBitDepth/${formatSampleRateKHz(effectiveRate)}kHz" else "LOSSLESS"
         }
         // Device-capability veto: a spatial manifest that slips through on a
         // device that cannot render Atmos (no spatializer, no JOC decoder)
@@ -5732,7 +5880,7 @@ class MusicPlayer @Inject constructor(
             android.util.Log.i("MusicPlayer", "[LOSSLESS] stereo fallback succeeded for '${track.title}'")
             return resolveLosslessTrackAudioStream(
                 track = track,
-                misc = misc.copy(dolbyAtmosEnabled = false, losslessQuality = stereoQuality),
+                misc = misc.copy(losslessQuality = stereoQuality),
                 excludedLosslessUrls = excludedLosslessUrls,
                 expectedDurationSeconds = expectedDurationSeconds,
             )
@@ -5785,7 +5933,7 @@ class MusicPlayer @Inject constructor(
             audioCodec = badge,
             cacheKey = "lossless:${track.mediaIdKey()}:${stream.formatId}",
             isLossless = isLossless,
-            bitDepth = resolvedBitDepth?.takeIf { it > 0 },
+            bitDepth = resolvedBitDepth?.takeIf { it > 0 } ?: streamBitDepth,
             samplingRateKHz = effectiveRate.takeIf { it > 0.0 },
             durationMs = stream.durationSeconds.takeIf { it > 0 }?.times(1_000L)
                 ?: track.durationMs
@@ -5876,8 +6024,12 @@ class MusicPlayer @Inject constructor(
 
     private fun publishResolvedQuality(resolved: ResolvedStream, expectedMediaId: String? = null) {
         if (expectedMediaId != null) {
-            val currentMediaId = _state.value.current?.mediaIdKey()
-            if (currentMediaId != null && currentMediaId != expectedMediaId) {
+            val current = _state.value.current
+            val currentMediaId = current?.mediaIdKey()
+            val matches = currentMediaId == expectedMediaId ||
+                current?.videoId == expectedMediaId ||
+                (playerDelegate.isInitialized() && player.currentMediaItem?.mediaId == expectedMediaId)
+            if (current != null && !matches) {
                 android.util.Log.d(
                     "MusicPlayer",
                     "Quality Pill: ignoring publishResolvedQuality for non-current track (expected=$expectedMediaId, current=$currentMediaId)",
@@ -6020,7 +6172,7 @@ class MusicPlayer @Inject constructor(
                 val expectedSec = (track.durationMs?.takeIf { it > 0 } ?: currentStream.durationMs)?.div(1000)?.toInt()
                 val upgradedSec = upgraded.durationMs?.div(1000)?.toInt()
                 if (expectedSec != null && upgradedSec != null && expectedSec > 0 && upgradedSec > 0) {
-                    if (kotlin.math.abs(expectedSec - upgradedSec) > 12) {
+                    if (kotlin.math.abs(expectedSec - upgradedSec) > 35) {
                         android.util.Log.w("MusicPlayer", "[STREAM UPGRADE] Severe duration mismatch for '${track.title}': expected ${expectedSec}s vs candidate ${upgradedSec}s")
                         return@launch
                     }
@@ -6029,8 +6181,6 @@ class MusicPlayer @Inject constructor(
                 currentCoroutineContext().ensureActive()
                 if (generation != playRequestGeneration.get()) return@launch
 
-                // Lock the playback pipeline to the source track's format throughout this session.
-                // Upgrades are registered and cached for future playback without interrupting active playback.
                 val knownDur = upgraded.durationMs
                     ?: track.durationMs
                     ?: findKnownDuration(track)
@@ -6042,14 +6192,333 @@ class MusicPlayer @Inject constructor(
                 registerPreparedStream(upgraded)
                 cacheCurrentTrackStream(upgraded)
                 logStreamEvent("stream-upgrade-cached", upgraded, retry = 0)
-                android.util.Log.i(
-                    "MusicPlayer",
-                    "[STREAM UPGRADE] Cached upgraded stream for '${track.title}' (${upgraded.audioCodec}) for future playback without interrupting active session",
+
+                // Check whether the active track is still playing and eligible for swap
+                val currentPos = withContext(Dispatchers.Main.immediate) {
+                    if (!playerDelegate.isInitialized()) return@withContext -1L
+                    if (generation != playRequestGeneration.get()) return@withContext -1L
+                    val currentIndex = player.currentMediaItemIndex
+                    if (currentIndex !in 0 until player.mediaItemCount) return@withContext -1L
+                    val currentItem = player.getMediaItemAt(currentIndex)
+                    if (currentItem.mediaId != expectedMediaId && currentItem.mediaId != track.mediaIdKey()) return@withContext -1L
+
+                    val dur = player.duration
+                    val pos = player.currentPosition
+                    if (dur > 0L && pos > dur - 12_000L) {
+                        android.util.Log.d("MusicPlayer", "[STREAM UPGRADE] Near end of track (${pos}/${dur}ms), omitting swap")
+                        return@withContext -1L
+                    }
+                    if (outgoingPlayer != null || crossfadeStandbyPreparing || crossfadeStandbyArmed) {
+                        android.util.Log.d("MusicPlayer", "[STREAM UPGRADE] Crossfade in flight, omitting swap")
+                        return@withContext -1L
+                    }
+                    pos
+                }
+                if (currentPos < 0L) return@launch
+
+                // Pre-audition on silent background player before touching active playback
+                var swapCandidate = upgraded
+                var auditionSuccess = auditionStream(
+                    track = track,
+                    upgraded = swapCandidate,
+                    targetPositionMs = currentPos,
+                    expectedDurationMs = knownDur,
+                    generation = generation,
                 )
+                if (!auditionSuccess && upgraded.audioCodec == "DOLBY ATMOS") {
+                    // Immersive mix proved unplayable here: fall back to
+                    // stereo lossless via the same hot-swap path so the track
+                    // still promotes off lossy instead of sticking on it.
+                    android.util.Log.w("MusicPlayer", "[STREAM UPGRADE] Immersive audition failed for '${track.title}'; trying stereo fallback via hot-swap")
+                    val stereoMisc = misc.copy(
+                        losslessQuality = if (misc.losslessQuality == LosslessMusicApi.QUALITY_DOLBY_ATMOS) {
+                            LosslessMusicApi.QUALITY_MAX_HI_RES
+                        } else {
+                            misc.losslessQuality
+                        },
+                    )
+                    val stereoCandidate = runCatching {
+                        resolveLosslessTrackAudioStream(track, stereoMisc, excludedLosslessUrls = emptySet())
+                    }.getOrNull()
+                    if (stereoCandidate != null && isWorthSwapping(currentStream, stereoCandidate)) {
+                        val stereoKnownDur = stereoCandidate.durationMs ?: knownDur
+                        registerPreparedStream(stereoCandidate)
+                        cacheCurrentTrackStream(stereoCandidate)
+                        val stereoAudition = auditionStream(
+                            track = track,
+                            upgraded = stereoCandidate,
+                            targetPositionMs = currentPos,
+                            expectedDurationMs = stereoKnownDur,
+                            generation = generation,
+                        )
+                        if (stereoAudition) {
+                            swapCandidate = stereoCandidate
+                            auditionSuccess = true
+                        }
+                    }
+                }
+                if (!auditionSuccess) {
+                    android.util.Log.w("MusicPlayer", "[STREAM UPGRADE] Audition failed for '${track.title}'; retaining active stream without interruption")
+                    // Never cut audio for a failed probe: drop the bad
+                    // rendition so a later retry doesn't reuse it.
+                    runCatching { preparedStreams.remove(swapCandidate.cacheKey) }
+                    runCatching { mediaCache.removeResource(swapCandidate.cacheKey) }
+                    return@launch
+                }
+
+                currentCoroutineContext().ensureActive()
+                if (generation != playRequestGeneration.get()) return@launch
+
+                // Perform seamless swap on Main thread with cached bytes ready
+                withContext(Dispatchers.Main.immediate) {
+                    if (generation != playRequestGeneration.get()) return@withContext
+                    if (!playerDelegate.isInitialized()) return@withContext
+                    val currentIndex = player.currentMediaItemIndex
+                    if (currentIndex !in 0 until player.mediaItemCount) return@withContext
+                    val currentItem = player.getMediaItemAt(currentIndex)
+                    if (currentItem.mediaId != expectedMediaId && currentItem.mediaId != track.mediaIdKey()) return@withContext
+
+                    val dur = player.duration
+                    val swapPos = player.currentPosition
+                    if (dur > 0L && swapPos > dur - 10_000L) {
+                        android.util.Log.d("MusicPlayer", "[STREAM UPGRADE] Near end of track (${swapPos}/${dur}ms), omitting swap")
+                        return@withContext
+                    }
+                    if (outgoingPlayer != null || crossfadeStandbyPreparing || crossfadeStandbyArmed) {
+                        android.util.Log.d("MusicPlayer", "[STREAM UPGRADE] Crossfade in flight, omitting swap")
+                        return@withContext
+                    }
+
+                    val playWhenReady = player.playWhenReady
+                    val updatedMediaItem = track.toMediaItem(swapCandidate)
+
+                    // Same song, same position, better source: mark so the
+                    // transition callback doesn't treat it as a new track.
+                    swappingMediaId = updatedMediaItem.mediaId
+                    registerPreparedStream(swapCandidate)
+                    stagePendingQuality(updatedMediaItem.mediaId, swapCandidate)
+                    stagePendingQuality(track.mediaIdKey(), swapCandidate)
+                    track.videoId?.let { stagePendingQuality(it, swapCandidate) }
+                    replaceMediaItemPreservingShuffle(currentIndex, updatedMediaItem)
+                    lastSeekTargetMs = swapPos
+                    lastSeekAtElapsedMs = SystemClock.elapsedRealtime()
+                    player.seekTo(currentIndex, swapPos)
+                    player.prepare()
+                    if (playWhenReady) {
+                        player.play()
+                    }
+
+                    // Update quality pill and signal path quality teller immediately
+                    publishResolvedQuality(swapCandidate, expectedMediaId = track.mediaIdKey())
+                    applyDacRoutingFor(dacRateFor(swapCandidate), swapCandidate.audioCodec)
+                    updateBitPerfectState()
+
+                    logStreamEvent("stream-upgrade-swapped", swapCandidate, retry = 0)
+                    android.util.Log.i(
+                        "MusicPlayer",
+                        "[STREAM UPGRADE] Seamlessly hot-swapped '${track.title}' to ${swapCandidate.audioCodec} (${swapCandidate.bitrateKbps}kbps, ${swapCandidate.samplingRateKHz}kHz) at ${swapPos}ms",
+                    )
+                }
             } catch (_: CancellationException) {
             } catch (e: Throwable) {
                 android.util.Log.w("MusicPlayer", "[STREAM UPGRADE] Exception upgrading '${track.title}': ${e.message}")
             }
+        }
+    }
+
+    private suspend fun auditionStream(
+        track: PlayableTrack,
+        upgraded: ResolvedStream,
+        targetPositionMs: Long,
+        expectedDurationMs: Long?,
+        generation: Long = playRequestGeneration.get(),
+    ): Boolean = withContext(Dispatchers.Main) {
+        var auditionPlayer: ExoPlayer? = null
+        try {
+            val resolvingFactory = ResolvingDataSource.Factory(cacheDataSourceFactory) { dataSpec ->
+                val stream = dataSpec.key?.let(preparedStreams::get)
+                    ?: preparedStreams.values.firstOrNull { it.url == dataSpec.uri.toString() }
+                if (stream != null) {
+                    dataSpec.buildUpon()
+                        .setKey(stream.cacheKey)
+                        .build()
+                        .withRequestHeaders(stream.requestHeaders)
+                } else {
+                    dataSpec
+                }
+            }
+            // Same decode path as the active player: platform immersive
+            // renderer ahead of software fallback so a spatial mix auditions
+            // exactly as it would play. A bare factory without it fails
+            // spatial manifests here while the main pipeline could play them.
+            val renderersFactory = object : DefaultRenderersFactory(appContext) {
+                override fun buildAudioRenderers(
+                    context: Context,
+                    extensionRendererMode: Int,
+                    mediaCodecSelector: MediaCodecSelector,
+                    enableDecoderFallback: Boolean,
+                    audioSink: AudioSink,
+                    eventHandler: Handler,
+                    eventListener: AudioRendererEventListener,
+                    out: ArrayList<Renderer>,
+                ) {
+                    val immersiveRenderer = object : MediaCodecAudioRenderer(
+                        context,
+                        mediaCodecSelector,
+                        enableDecoderFallback,
+                        eventHandler,
+                        eventListener,
+                        audioSink,
+                    ) {
+                        override fun supportsFormat(
+                            mediaCodecSelector: MediaCodecSelector,
+                            format: androidx.media3.common.Format,
+                        ): Int {
+                            val mime = format.sampleMimeType?.lowercase().orEmpty()
+                            val isImmersive = mime.contains("eac3") || mime.contains("ec-3") ||
+                                mime.contains("ac-3") || mime.contains("ac3") || mime.contains("ac4") ||
+                                mime.contains("mha1") || mime.contains("mhm1")
+                            if (!isImmersive) {
+                                return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE)
+                            }
+                            return super.supportsFormat(mediaCodecSelector, format)
+                        }
+                    }
+                    out.add(immersiveRenderer)
+                    super.buildAudioRenderers(
+                        context,
+                        extensionRendererMode,
+                        mediaCodecSelector,
+                        enableDecoderFallback,
+                        audioSink,
+                        eventHandler,
+                        eventListener,
+                        out,
+                    )
+                }
+            }.apply {
+                setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                setEnableDecoderFallback(true)
+                setMediaCodecSelector(accurateAudioMediaCodecSelector)
+            }
+            val loadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    /* minBufferMs = */ 15_000,
+                    /* maxBufferMs = */ 15_000,
+                    /* bufferForPlaybackMs = */ 1_500,
+                    /* bufferForPlaybackAfterRebufferMs = */ 1_500,
+                )
+                .build()
+
+            auditionPlayer = ExoPlayer.Builder(appContext, renderersFactory)
+                .setMediaSourceFactory(
+                    DefaultMediaSourceFactory(appContext).setDataSourceFactory(resolvingFactory)
+                        .setDrmSessionManagerProvider { mediaItem ->
+                            val stream = mediaItem.localConfiguration?.customCacheKey
+                                ?.let(preparedStreams::get)
+                            val descriptor = stream?.segmentedDrm
+                            if (descriptor?.drm == null) DrmSessionManager.DRM_UNSUPPORTED
+                            else moduleDrmFactory.sessionManagerFor(descriptor)
+                        },
+                )
+                .setLoadControl(loadControl)
+                .build().apply {
+                    playWhenReady = false
+                    volume = 0f
+                }
+
+            val testItem = track.toMediaItem(upgraded)
+            auditionPlayer.setMediaItem(testItem)
+            if (targetPositionMs > 0L) {
+                auditionPlayer.seekTo(targetPositionMs)
+            }
+            auditionPlayer.prepare()
+
+            // Condition-based wait, no fixed timeout: the silent check ends
+            // when the candidate proves playable (ready + buffered past the
+            // live edge), proves unplayable (error/ended/duration mismatch),
+            // or becomes irrelevant (new generation / track changed).
+            while (currentCoroutineContext().isActive) {
+                if (generation != playRequestGeneration.get()) return@withContext false
+                if (auditionPlayer.playerError != null) {
+                    android.util.Log.w(
+                        "MusicPlayer",
+                        "[STREAM AUDITION] Stream failed: ${auditionPlayer.playerError?.errorCodeName}",
+                    )
+                    return@withContext false
+                }
+                if (auditionPlayer.playbackState == Player.STATE_ENDED) {
+                    android.util.Log.w(
+                        "MusicPlayer",
+                        "[STREAM AUDITION] Stream ended prematurely",
+                    )
+                    return@withContext false
+                }
+                if (auditionPlayer.playbackState == Player.STATE_READY) {
+                    val candidateDur = auditionPlayer.duration
+                    if (expectedDurationMs != null && expectedDurationMs > 0L && candidateDur > 0L) {
+                        if (kotlin.math.abs(candidateDur - expectedDurationMs) > 35_000L) {
+                            android.util.Log.w(
+                                "MusicPlayer",
+                                "[STREAM AUDITION] Duration mismatch: expected ${expectedDurationMs}ms vs candidate ${candidateDur}ms",
+                            )
+                            return@withContext false
+                        }
+                    }
+                    // Codec truth: a lossless claim arriving as lossy bytes, or
+                    // a spatial claim arriving as plain stereo bytes, is a
+                    // transcode/mislabeled rendition — reject before the swap.
+                    val decodedMime = runCatching { auditionPlayer.audioFormat?.sampleMimeType?.lowercase().orEmpty() }.getOrDefault("")
+                    if (decodedMime.isNotBlank()) {
+                        val claimsSpatial = upgraded.audioCodec == "DOLBY ATMOS" || upgraded.audioCodec == "SPATIAL AUDIO"
+                        val isSpatialMime = decodedMime.contains("eac3") || decodedMime.contains("ec-3") ||
+                            decodedMime.contains("ac-3") || decodedMime.contains("ac3") ||
+                            decodedMime.contains("mha1") || decodedMime.contains("mhm1")
+                        if (claimsSpatial && !isSpatialMime) {
+                            android.util.Log.w(
+                                "MusicPlayer",
+                                "[STREAM AUDITION] Codec mismatch: claimed ${upgraded.audioCodec} but decoded $decodedMime",
+                            )
+                            return@withContext false
+                        }
+                        if (upgraded.isLossless) {
+                            val isLossyMime = decodedMime.contains("opus") || decodedMime.contains("mp4a") ||
+                                decodedMime.contains("aac") || decodedMime.contains("mp3") || decodedMime.contains("mpeg")
+                            if (isLossyMime) {
+                                android.util.Log.w(
+                                    "MusicPlayer",
+                                    "[STREAM AUDITION] Codec mismatch: claimed lossless but decoded $decodedMime",
+                                )
+                                return@withContext false
+                            }
+                        }
+                    }
+                    val currentLivePos = if (playerDelegate.isInitialized()) player.currentPosition else targetPositionMs
+                    // Stale check: the live edge moved on or the track
+                    // changed while auditioning; this candidate no longer
+                    // matches the swap point.
+                    if (generation != playRequestGeneration.get()) return@withContext false
+                    val neededBuffer = currentLivePos + 4_000L
+                    if (auditionPlayer.bufferedPosition >= neededBuffer || auditionPlayer.bufferedPercentage >= 100) {
+                        android.util.Log.i(
+                            "MusicPlayer",
+                            "[STREAM AUDITION] Stream audition successful! Buffered through ${auditionPlayer.bufferedPosition}ms",
+                        )
+                        return@withContext true
+                    }
+                }
+                delay(150L)
+            }
+            false
+        } catch (e: Throwable) {
+            android.util.Log.w("MusicPlayer", "[STREAM AUDITION] Exception during audition: ${e.message}")
+            false
+        } finally {
+            auditionPlayer?.let { p ->
+                runCatching { p.release() }
+            }
+            // Grace period for Media3 cache locks to release before main player accesses the cache
+            delay(150L)
         }
     }
 
@@ -6288,6 +6757,36 @@ class MusicPlayer @Inject constructor(
         .firstOrNull()
         ?.responseCode
 
+    /**
+     * Rendition depth for the bytes actually playing. Handles every URL shape
+     * this pipeline stores: base64 data URLs (pre-resolve), the MPD file we
+     * wrote from them (file:// post-resolve), and raw XML. Network URLs
+     * return null — never fetch here; the resolve path already measured them.
+     */
+    private fun renditionDepthFromStreamUrl(url: String): Int? {
+        if (url.startsWith("data:application/dash+xml")) {
+            return runCatching { LosslessMusicApi.manifestBitDepthOf(url) }.getOrNull()
+        }
+        if (url.trimStart().startsWith("<")) {
+            return runCatching { LosslessMusicApi.manifestBitDepthOf(url) }.getOrNull()
+        }
+        val path = when {
+            url.startsWith("file://") -> runCatching { Uri.parse(url).path }.getOrNull()
+            url.startsWith("/") -> url
+            else -> null
+        } ?: return null
+        return runCatching {
+            val f = java.io.File(path)
+            if (!f.exists() || f.length() <= 0L || f.length() > 256 * 1024L) return@runCatching null
+            val head = ByteArray(32 * 1024)
+            java.io.FileInputStream(f).use { ins ->
+                val n = ins.read(head)
+                if (n <= 0) return@runCatching null
+                LosslessMusicApi.manifestBitDepthOf(String(head, 0, n, Charsets.UTF_8))
+            }
+        }.getOrNull()
+    }
+
     private fun playbackRetryDelayMs(error: PlaybackException, retry: Int): Long {
         val status = error.httpStatusCodeOrNull()
         // 403 (expired/throttled googlevideo URL) benefits from a short
@@ -6377,15 +6876,32 @@ class MusicPlayer @Inject constructor(
 
             // Retriever values are measured container facts (STREAMINFO),
             // not backend hearsay: a present 16 beside 96kHz is a genuine
-            // 16/96 file — trust it. Absent stays absent (unknown, not 16;
-            // missing rate is not 44.1kHz either). The decoder's measured
-            // PCM encoding restores certainty where measurable.
-            val effectiveBitDepth = bitDepth?.takeIf { it > 0 }
+            // 16/96 file — trust it. When the retriever omits depth/rate
+            // (pre-S APIs, several OEMs/files), the FLAC header itself is
+            // read instead — same STREAMINFO facts, working on every device.
+            // Only a truly unreadable header stays unknown, never a guessed
+            // 16 or 44.1.
+            var effectiveBitDepth = bitDepth?.takeIf { it > 0 }
+            var effectiveRateKHz = sampleRateKHz
+            if (isFlac && (effectiveBitDepth == null || effectiveRateKHz == null)) {
+                runCatching {
+                    val header: FlacStreamInfo? = if (url.startsWith("content://")) {
+                        appContext.contentResolver.openInputStream(Uri.parse(url))?.use { readFlacStreamInfo(it) }
+                    } else {
+                        java.io.File(url.removePrefix("file://")).takeIf { it.isFile && it.canRead() }
+                            ?.inputStream()?.use { readFlacStreamInfo(it) }
+                    }
+                    if (header != null) {
+                        if (effectiveBitDepth == null) effectiveBitDepth = header.bitDepth?.takeIf { it > 0 }
+                        if (effectiveRateKHz == null) header.sampleRateHz?.takeIf { it > 0 }?.let { effectiveRateKHz = it / 1000.0 }
+                    }
+                }
+            }
 
             val codec = when {
-                isFlac && effectiveBitDepth != null && sampleRateKHz != null && sampleRateKHz > 0.0 ->
-                    "$effectiveBitDepth/${formatSampleRateKHz(sampleRateKHz)}kHz"
-                isFlac && ((effectiveBitDepth ?: 0) > 16 || (sampleRateKHz ?: 0.0) > 48.0) -> "HI-RES FLAC"
+                isFlac && effectiveBitDepth != null && effectiveRateKHz != null && effectiveRateKHz > 0.0 ->
+                    "$effectiveBitDepth/${formatSampleRateKHz(effectiveRateKHz)}kHz"
+                isFlac && ((effectiveBitDepth ?: 0) > 16 || (effectiveRateKHz ?: 0.0) > 48.0) -> "HI-RES FLAC"
                 isFlac -> "FLAC"
                 isM4a -> "AAC"
                 isOpus -> "OPUS"
@@ -6398,7 +6914,7 @@ class MusicPlayer @Inject constructor(
                     audioCodec = codec,
                     bitrateKbps = bitrateKbps,
                     bitDepth = effectiveBitDepth,
-                    samplingRateKHz = sampleRateKHz,
+                    samplingRateKHz = effectiveRateKHz,
                     // FLAC is lossless at every bit depth. Requiring >16 here
                     // marked CD-quality (16/44.1) FLAC — and any FLAC whose
                     // container omits BITS_PER_SAMPLE — as lossy, which pushed
@@ -6624,7 +7140,7 @@ class MusicPlayer @Inject constructor(
         // TIME_UNSET (buffering / container not parsed yet): that reset froze
         // the bar at 0:00 and disabled seeking until the next event.
         val dur = effectiveDuration(player.duration, player, previous.durationMs)
-        val currentMediaMatch = isCurrentMediaMatch(player, previous.current)
+        val currentMediaMatch = isCurrentMediaMatch(player, previous.current) || player.isPlaying
         val pos = if (!exclusiveUsbOutput.isActive() && player.playbackState != Player.STATE_IDLE && currentMediaMatch) {
             settleSeekPosition(player.currentPosition.coerceAtLeast(0L)).let { raw ->
                 if (previous.positionMs == 0L && player.playbackState == Player.STATE_BUFFERING && raw > 1_500L) 0L else raw
@@ -6632,6 +7148,13 @@ class MusicPlayer @Inject constructor(
         } else {
             previous.positionMs
         }
+        val hasExplicitPrevious = sameTrack && isExplicitQuality(previous.audioCodec, previous.bitDepth, previous.samplingRateKHz)
+        val streamForCurrent = if (!hasExplicitPrevious) {
+            player.currentMediaItem?.localConfiguration?.customCacheKey?.let(preparedStreams::get)
+                ?: preparedStreams.values.firstOrNull { it.url == player.currentMediaItem?.localConfiguration?.uri?.toString() }
+                ?: current?.let { findPreparedStreamFor(it, it.videoId, it.mediaIdKey() in losslessBypassMediaIds) }
+        } else null
+
         _state.value = MusicPlayerState(
             current = current,
             queue = queue,
@@ -6646,11 +7169,11 @@ class MusicPlayer @Inject constructor(
             shuffleEnabled = player.shuffleModeEnabled,
             repeatMode = player.repeatMode,
             speed = player.playbackParameters.speed,
-            bitrateKbps = previous.bitrateKbps.takeIf { sameTrack },
-            audioCodec = previous.audioCodec.takeIf { sameTrack },
-            isLossless = previous.isLossless && sameTrack,
-            bitDepth = previous.bitDepth.takeIf { sameTrack },
-            samplingRateKHz = previous.samplingRateKHz.takeIf { sameTrack },
+            bitrateKbps = previous.bitrateKbps.takeIf { hasExplicitPrevious } ?: streamForCurrent?.bitrateKbps,
+            audioCodec = previous.audioCodec.takeIf { hasExplicitPrevious } ?: streamForCurrent?.audioCodec,
+            isLossless = (previous.isLossless && sameTrack) || (streamForCurrent?.isLossless == true),
+            bitDepth = previous.bitDepth.takeIf { hasExplicitPrevious } ?: streamForCurrent?.bitDepth,
+            samplingRateKHz = previous.samplingRateKHz.takeIf { hasExplicitPrevious } ?: streamForCurrent?.samplingRateKHz,
             sleepTimerRemainingMs = sleepTimerDeadlineMs?.minus(SystemClock.elapsedRealtime())?.coerceAtLeast(0),
             error = if (isPlayingState) null else previous.error,
         )
@@ -6733,6 +7256,11 @@ class MusicPlayer @Inject constructor(
         /** Signal-path report + stream-health sampling cadence while playing. */
         const val SIGNAL_PATH_TICK_MS = 1_000L
         const val MAX_PLAYBACK_RETRIES = 3
+        /** Consecutive failures for the same mediaId before auto-advance is
+         *  allowed. First transient failure holds with tap-to-retry so a
+         *  slow first OPUS resolve never looks like a 1-2s play-then-skip.
+         *  Proven-dead (confirmed-unplayable / unsupported) still skips at once. */
+        const val MIN_UNAVAILABLE_ATTEMPTS_BEFORE_SKIP = 2
         /** A failure at/after this position means the track audibly played,
          *  so it must hold with tap-to-retry instead of auto-skipping. */
         const val MIN_AUDIBLE_PLAYBACK_MS = 1_000L

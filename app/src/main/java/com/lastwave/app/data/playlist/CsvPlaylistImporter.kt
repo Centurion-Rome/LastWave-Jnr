@@ -3,8 +3,11 @@ package com.lastwave.app.data.playlist
 import com.lastwave.app.data.generate.GeneratedTrack
 import com.lastwave.app.data.generate.youtubeVideoIdOrNull
 import com.lastwave.app.data.music.InnerTubeMusicApi
+import com.lastwave.app.data.music.TextMatch
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.text.Normalizer
 import java.util.Locale
 import javax.inject.Inject
@@ -119,11 +122,21 @@ class CsvPlaylistImporter @Inject constructor(
         // Nothing was claimed beyond the link itself, so there is nothing to
         // contradict: this row asked for exactly this video.
         if (source.title.isBlank()) return true
+        val targetArtist = target.artist.removeSuffix(" - Topic")
+        val cleanTargetTitle = stripArtistPrefix(target.title, targetArtist)
+        val titleMatches = sameText(source.title, target.title, allowSafeVideoLabel = true) ||
+            sameText(source.title, cleanTargetTitle, allowSafeVideoLabel = true) ||
+            sameText(cleanBaseTitle(source.title), cleanBaseTitle(cleanTargetTitle)) ||
+            TextMatch.isSafeTitleMatch(target.title, source.title, source.artist)
         if (source.artist.isBlank() || source.artist.isUnknownArtistLabel()) {
-            return sameText(source.title, target.title, allowSafeVideoLabel = true)
+            return titleMatches
         }
-        if (!sameText(source.title, target.title, allowSafeVideoLabel = true)) return false
-        return sameArtist(source.artist, target.artist.removeSuffix(" - Topic"))
+        if (!titleMatches) return false
+        val normSourceArtist = normalize(source.artist).removePrefix("the ").trim()
+        val normTargetArtist = normalize(targetArtist).removePrefix("the ").trim()
+        return sameArtist(source.artist, targetArtist) ||
+            normTargetArtist.contains(normSourceArtist) || normSourceArtist.contains(normTargetArtist) ||
+            normalize(target.title).contains(normSourceArtist)
     }
 
     /**
@@ -149,11 +162,6 @@ class CsvPlaylistImporter @Inject constructor(
      *    and
      *  - a song buried anywhere in the result list is still reachable, because
      *    every candidate is offered to [matchesRow] instead of just the top hit.
-     *
-     * Nothing here accepts a similarity score. The previous fallback took a
-     * single fuzzy pick from [InnerTubeMusicApi.findBestMatchOrNull], which
-     * settles for a 60%-similar title, so live cuts, remixes and covers were
-     * imported in place of the requested song.
      */
     private suspend fun verifiedSearch(raw: CsvRawTrack, cleanArtist: String): YouTubeMusicTrack? {
         for (query in queryVariants(raw, cleanArtist)) {
@@ -162,29 +170,43 @@ class CsvPlaylistImporter @Inject constructor(
                 limit = SEARCH_RESULT_LIMIT,
                 prefetchStreams = false,
             )
-            candidates.firstOrNull { matchesRow(raw, it) }?.let { return it }
+            val exactMatches = candidates.filter { matchesRow(raw, it) }
+            if (exactMatches.isNotEmpty()) {
+                return exactMatches.maxByOrNull { TextMatch.matchScore(it, raw.title, cleanArtist) }
+            }
+
+            val flexibleMatches = candidates.filter { flexibleMatchesRow(raw, it) }
+            if (flexibleMatches.isNotEmpty()) {
+                return flexibleMatches.maxByOrNull { TextMatch.matchScore(it, raw.title, cleanArtist) }
+            }
         }
         return null
     }
 
     /**
-     * Query shapes in order of precision. Bracketed noise is dropped for the
-     * retry shapes only: the match itself is still validated against the row's
-     * original title, so this widens what search can surface without widening
-     * what counts as correct.
+     * Query shapes in order of precision. Prioritize clean artist and title
+     * so search quickly finds the right song without bursting rate-limits.
      */
     private fun queryVariants(raw: CsvRawTrack, cleanArtist: String): List<String> {
         if (raw.title.isBlank()) return emptyList()
         val title = raw.title.trim()
-        val baseTitle = title.replace(NOISE_SUFFIX, "").trim().ifBlank { title }
+        val baseTitle = cleanBaseTitle(title).ifBlank { title }
+        val primaryArtist = splitArtists(cleanArtist).firstOrNull() ?: cleanArtist
         return buildList<String> {
             if (cleanArtist.isNotBlank()) {
-                add("$title $cleanArtist")
-                add("$baseTitle $cleanArtist")
+                add("$title $primaryArtist")
+                if (cleanArtist != primaryArtist) {
+                    add("$title $cleanArtist")
+                }
+                if (baseTitle != title) {
+                    add("$baseTitle $primaryArtist")
+                }
                 add("$cleanArtist $title")
             }
             add(title)
-            add(baseTitle)
+            if (baseTitle != title) {
+                add(baseTitle)
+            }
         }.map(String::trim).distinct()
     }
 
@@ -192,17 +214,61 @@ class CsvPlaylistImporter @Inject constructor(
         if (!VIDEO_ID.matches(target.videoId)) return false
         if (raw.title.isBlank()) return false
         // A row that names an artist is held to title *and* artist. A
-        // title-only row (a plain list of song names, which used to match
-        // nothing at all) can only be held to its title, but that title must
-        // still match exactly rather than approximately.
+        // title-only row can only be held to its title.
         if (raw.artist.isBlank()) {
-            return sameText(raw.title, target.title, allowSafeVideoLabel = true)
+            val cleanTarget = stripArtistPrefix(target.title, target.artist)
+            return sameText(raw.title, target.title, allowSafeVideoLabel = true) ||
+                sameText(raw.title, cleanTarget, allowSafeVideoLabel = true)
         }
-        // Album is cleared: names drift far more often between a library export
-        // and a single upload than titles do, and a drifted album is not
-        // evidence of a different song.
         return isExactMatch(raw.copy(album = null), target)
     }
+
+    private fun flexibleMatchesRow(raw: CsvRawTrack, target: YouTubeMusicTrack): Boolean {
+        if (!VIDEO_ID.matches(target.videoId)) return false
+        if (raw.title.isBlank()) return false
+        if (!allowsVersion(raw.title, target.title)) return false
+        if (raw.artist.isNotBlank() && !sameArtist(raw.artist, target.artist)) return false
+
+        val rawBase = cleanBaseTitle(raw.title)
+        val cleanTarget = stripArtistPrefix(target.title, target.artist)
+        val targetBase = cleanBaseTitle(cleanTarget)
+
+        return (rawBase.isNotBlank() && sameText(rawBase, targetBase)) ||
+            TextMatch.isSafeTitleMatch(target.title, raw.title, raw.artist)
+    }
+
+    private fun allowsVersion(sourceTitle: String, targetTitle: String): Boolean {
+        val sNorm = normalize(sourceTitle)
+        val tNorm = normalize(targetTitle)
+        val versionWords = listOf("live", "remix", "cover", "karaoke", "instrumental", "acoustic", "tribute")
+        for (word in versionWords) {
+            if (tNorm.contains(word) && !sNorm.contains(word)) return false
+        }
+        return true
+    }
+
+    private fun cleanBaseTitle(title: String): String = title
+        .replace(SAFE_VIDEO_LABEL_REGEX, "")
+        .replace(SAFE_BRACKET_LABEL_REGEX, "")
+        .replace(FEATURE_REGEX, "")
+        .replace(NOISE_SUFFIX, "")
+        .replace(Regex("(?i)\\s*[\\[(]\\s*(?:\\d{4}\\s+)?(?:remaster(?:ed)?|remix|live|bonus|deluxe|edition|anniversary|version|mix|edit|audio|visualizer|explicit|clean|mono|stereo|original)\\b[^\\])]*[\\])]"), "")
+        .replace(Regex("(?i)\\s*-\\s*(?:(?:\\d{4}\\s+)?remaster(?:ed)?|radio\\s*edit|single\\s*version|bonus\\s*track|deluxe\\s*edition|live|album\\s*version|acoustic).*$"), "")
+        .trim()
+
+    private fun stripArtistPrefix(title: String, artist: String): String {
+        if (artist.isBlank()) return title
+        val clean = artist.removeSuffix(" - Topic").trim()
+        if (clean.isBlank()) return title
+        val escaped = Regex.escape(clean)
+        return title.replace(Regex("^(?i)\\s*$escaped\\s*[-–—:]\\s*"), "").trim()
+    }
+
+    private fun splitArtists(artist: String): List<String> =
+        artist.removeSuffix(" - Topic")
+            .split(Regex("(?i)\\s*(?:,|&|/|;|feat\\.?|ft\\.?|featuring|with|x)\\s*"))
+            .map(String::trim)
+            .filter(String::isNotBlank)
 
     private fun trackFrom(raw: CsvRawTrack, target: YouTubeMusicTrack): GeneratedTrack = GeneratedTrack(
         name = raw.title.ifBlank { target.title },
@@ -218,38 +284,48 @@ class CsvPlaylistImporter @Inject constructor(
         if (source.videoId != null && source.videoId != target.videoId) return false
         if (source.videoId == null && (source.title.isBlank() || source.artist.isBlank())) return false
         if (source.artist.isUnknownArtistLabel()) return false
-        if (source.title.isNotBlank() && !sameText(source.title, target.title, allowSafeVideoLabel = true)) return false
+        val cleanTargetTitle = stripArtistPrefix(target.title, target.artist.removeSuffix(" - Topic"))
+        val titleMatches = sameText(source.title, target.title, allowSafeVideoLabel = true) ||
+            sameText(source.title, cleanTargetTitle, allowSafeVideoLabel = true)
+        if (source.title.isNotBlank() && !titleMatches) return false
         if (source.artist.isNotBlank() && !sameArtist(source.artist, target.artist.removeSuffix(" - Topic"))) return false
-        if (!source.album.isNullOrBlank() && !sameText(source.album, target.album.orEmpty())) return false
+        if (!source.album.isNullOrBlank() && !target.album.isNullOrBlank() && !sameText(source.album, target.album.orEmpty())) return false
         return true
     }
 
     private fun sameText(source: String, target: String, allowSafeVideoLabel: Boolean = false): Boolean {
-        val normalized = normalize(source)
+        val srcText = if (allowSafeVideoLabel) stripSafeVideoLabel(source) else source
         val targetText = if (allowSafeVideoLabel) stripSafeVideoLabel(target) else target
-        return normalized.isNotBlank() && normalized == normalize(targetText)
+        val normalizedSrc = normalize(srcText)
+        val normalizedTarget = normalize(targetText)
+        return normalizedSrc.isNotBlank() && normalizedSrc == normalizedTarget
     }
 
     private fun sameArtist(source: String, target: String): Boolean {
-        if (sameText(source, target)) return true
-        val primaryTarget = target
-            .split(Regex("(?i)\\s*(?:,|&|feat\\.?|ft\\.?|featuring)\\s*"), limit = 2)
-            .first()
+        val cleanTarget = target
             .removeSuffix(" - Topic")
+            .replace(Regex("(?i)\\b(?:vevo|official|music|records|topic)\\b"), "")
             .trim()
-        return sameText(source, primaryTarget)
+        if (sameText(source, cleanTarget)) return true
+        val sourceList = splitArtists(source)
+        val targetList = splitArtists(cleanTarget)
+        val primarySource = sourceList.firstOrNull() ?: source
+        val primaryTarget = targetList.firstOrNull() ?: cleanTarget
+        if (sameText(primarySource, primaryTarget)) return true
+        if (sourceList.any { s -> targetList.any { t -> sameText(s, t) } }) return true
+        val normSource = normalize(primarySource).removePrefix("the ").trim()
+        val normTarget = normalize(primaryTarget).removePrefix("the ").trim()
+        return normSource.isNotBlank() && normSource == normTarget
     }
 
     private fun stripSafeVideoLabel(title: String): String = title
-        .replace(
-            Regex("(?i)\\s*[\\[(](official\\s*(audio|video)|music\\s*video|lyric\\s*video|audio|video|hd|hq|4k)[\\])]"),
-            "",
-        )
+        .replace(SAFE_VIDEO_LABEL_REGEX, "")
+        .replace(SAFE_BRACKET_LABEL_REGEX, "")
         .trim()
 
     private fun normalize(value: String): String =
         Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
-            .replace(Regex("['’]"), "")
+            .replace(Regex("['’\"“”]"), "")
             .replace(Regex("[^\\p{L}\\p{M}\\p{N}]+"), " ").trim()
 
     private fun String.isUnknownArtistLabel(): Boolean =
@@ -269,12 +345,21 @@ class CsvPlaylistImporter @Inject constructor(
 
     private fun decodeText(inputStream: InputStream): String {
         val bytes = inputStream.readBytes()
-        val charset = when {
-            bytes.size >= 2 && bytes[0] == 0xff.toByte() && bytes[1] == 0xfe.toByte() -> Charsets.UTF_16LE
-            bytes.size >= 2 && bytes[0] == 0xfe.toByte() && bytes[1] == 0xff.toByte() -> Charsets.UTF_16BE
-            else -> Charsets.UTF_8
+        if (bytes.size >= 2 && bytes[0] == 0xff.toByte() && bytes[1] == 0xfe.toByte()) {
+            return String(bytes, Charsets.UTF_16LE).removePrefix("\uFEFF")
         }
-        return String(bytes, charset).removePrefix("\uFEFF")
+        if (bytes.size >= 2 && bytes[0] == 0xfe.toByte() && bytes[1] == 0xff.toByte()) {
+            return String(bytes, Charsets.UTF_16BE).removePrefix("\uFEFF")
+        }
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val utf8String = try {
+            decoder.decode(ByteBuffer.wrap(bytes)).toString()
+        } catch (_: Exception) {
+            null
+        }
+        return (utf8String ?: String(bytes, Charsets.ISO_8859_1)).removePrefix("\uFEFF")
     }
 
     internal fun parseTracks(text: String, filename: String): List<CsvRawTrack> {
@@ -285,44 +370,83 @@ class CsvPlaylistImporter @Inject constructor(
         }
         if (filename.endsWith(".txt", true) && lines.none { '\t' in it } &&
             lines.first().split(',', ';').map(::normalize).all { it in TITLE_HEADERS || it in ARTIST_HEADERS || it in URL_HEADERS }.not()) {
-            return lines.map(::parseTextTrack)
+            return lines.filterNot { it.startsWith('#') || it.startsWith("//") }.map(::parseTextTrack)
         }
-        val delimiter = detectDelimiter(text)
-        val records = repairCollapsedRows(parseRecords(text, delimiter), delimiter)
+
+        // Drop comment or separator directive lines at the top of CSV files (e.g. Exportify, Soundiiz, Excel)
+        val cleanedLines = text.lineSequence()
+            .map(String::trim)
+            .filter { line ->
+                line.isNotBlank() &&
+                    !line.startsWith('#') &&
+                    !line.startsWith("//") &&
+                    !line.startsWith("sep=", ignoreCase = true)
+            }
+            .toList()
+        if (cleanedLines.isEmpty()) return emptyList()
+        val cleanedText = cleanedLines.joinToString("\n")
+
+        val delimiter = detectDelimiter(cleanedText)
+        val records = repairCollapsedRows(parseRecords(cleanedText, delimiter), delimiter)
+            .filter { row -> row.isNotEmpty() && row.any(String::isNotBlank) }
         val first = records.firstOrNull() ?: return emptyList()
         val headers = first.map(::normalize)
-        val titleIndex = headers.indexOfFirst { it in TITLE_HEADERS }
-        val artistIndex = headers.indexOfFirst { it in ARTIST_HEADERS }
+
+        val dataRows = records.drop(1)
+        fun isColMostlyNumeric(colIdx: Int): Boolean {
+            if (dataRows.isEmpty()) return false
+            val nonBlank = dataRows.mapNotNull { it.getOrNull(colIdx)?.trim() }.filter { it.isNotEmpty() }
+            if (nonBlank.isEmpty()) return false
+            return nonBlank.count { it.all(Char::isDigit) }.toDouble() / nonBlank.size >= 0.7
+        }
+
+        val isExplicitIndexCol = { idx: Int ->
+            val h = headers.getOrNull(idx).orEmpty()
+            h in INDEX_HEADERS ||
+                (h == "track" && headers.any { it in PRIMARY_TITLE_HEADERS || it in SECONDARY_TITLE_HEADERS }) ||
+                isColMostlyNumeric(idx)
+        }
+
+        val titleIndex = headers.indexOfFirst { it in PRIMARY_TITLE_HEADERS }.takeIf { it >= 0 }
+            ?: headers.indexOfFirst { it in SECONDARY_TITLE_HEADERS }.takeIf { it >= 0 }
+            ?: headers.indexOfFirst { it == "track" }.takeIf { it >= 0 && !isExplicitIndexCol(it) }
+            ?: -1
+
+        val artistIndex = headers.indexOfFirst { it in PRIMARY_ARTIST_HEADERS }.takeIf { it >= 0 }
+            ?: headers.indexOfFirst { it in SECONDARY_ARTIST_HEADERS }.takeIf { it >= 0 }
+            ?: -1
+
         val albumIndex = headers.indexOfFirst { it in ALBUM_HEADERS }
         val urlIndex = headers.indexOfFirst { it in URL_HEADERS }
-        // Only a multi-column first row is treated as a header. In a
-        // single-column file that guess is indistinguishable from data, and
-        // taking it swallows a real song: a list of names starting with
-        // "Song", "Name" or "Track" used to lose its first entry.
+
+        // Only a multi-column first row without purely numeric index cells is treated as a header. In a
+        // single-column file that guess is indistinguishable from data.
         val hasHeader = first.size >= 2 &&
+            !first.any { it.trim().all(Char::isDigit) && it.trim().isNotEmpty() } &&
             (titleIndex >= 0 || artistIndex >= 0 || albumIndex >= 0 || urlIndex >= 0)
-        if (first.size == 1 && !hasHeader) return lines.filterNot { it.startsWith('#') }.map(::parseTextTrack)
-        val titleColumn = if (titleIndex >= 0) {
+        if (first.size == 1 && !hasHeader) return cleanedLines.map(::parseTextTrack)
+
+        val titleColumn = if (hasHeader && titleIndex >= 0) {
             titleIndex
         } else if (hasHeader) {
-            (0 until first.size).firstOrNull { it != artistIndex && it != albumIndex && it != urlIndex } ?: 0
-        } else 0
-        val artistColumn = if (artistIndex >= 0) {
+            (0 until first.size).firstOrNull { it != artistIndex && it != albumIndex && it != urlIndex && !isExplicitIndexCol(it) } ?: 0
+        } else {
+            (0 until first.size).firstOrNull { !isExplicitIndexCol(it) } ?: 0
+        }
+
+        val artistColumn = if (hasHeader && artistIndex >= 0) {
             artistIndex
         } else if (hasHeader) {
-            // No artist header: never guess another column (e.g. the album
-            // cell) as the artist. -1 reads as empty via getOrNull.
             -1
-        } else 1
+        } else {
+            (0 until first.size).firstOrNull { it != titleColumn && !isColMostlyNumeric(it) } ?: 1
+        }
+
         return records.drop(if (hasHeader) 1 else 0).mapNotNull { row ->
             if (hasHeader && row.map(::normalize) == headers) return@mapNotNull null
             val titleCell = row.getOrNull(titleColumn).orEmpty().trim()
-            val artist = row.getOrNull(artistColumn).orEmpty().trim()
+            val rawArtist = if (artistColumn >= 0) row.getOrNull(artistColumn).orEmpty().trim() else ""
             val rawVideoId = if (urlIndex >= 0) row.getOrNull(urlIndex)?.trim()?.let(::youtubeId) else null
-            // Only a full URL counts as a link when it turns up in some other
-            // column. A bare 11-character token is far more likely to be an
-            // album or an artist than a video id, and treating it as one
-            // silently imports whatever that "id" happens to point at.
             val videoId = rawVideoId ?: row.firstNotNullOfOrNull { cell ->
                 val trimmed = cell.trim()
                 if (trimmed.startsWith("https://", true) || trimmed.startsWith("http://", true)) {
@@ -331,10 +455,20 @@ class CsvPlaylistImporter @Inject constructor(
                     null
                 }
             }
-            // A link-only row must not carry its own URL through as the title.
             val title = titleCell.takeUnless { videoId != null && youtubeId(it.trim()) == videoId }
             if (title.isNullOrBlank() && videoId == null) return@mapNotNull null
-            CsvRawTrack(title.orEmpty(), artist, row.getOrNull(albumIndex)?.trim()?.takeIf(String::isNotBlank), videoId)
+
+            var finalTitle = title.orEmpty()
+            var finalArtist = rawArtist
+            if (finalArtist.isBlank() && finalTitle.isNotBlank() && videoId == null) {
+                val parsed = parseTextTrack(finalTitle)
+                if (parsed.title.isNotBlank() && parsed.artist.isNotBlank()) {
+                    finalTitle = parsed.title
+                    finalArtist = parsed.artist
+                }
+            }
+
+            CsvRawTrack(finalTitle, finalArtist, row.getOrNull(albumIndex)?.trim()?.takeIf(String::isNotBlank), videoId)
         }
     }
 
@@ -514,14 +648,24 @@ class CsvPlaylistImporter @Inject constructor(
         const val SEARCH_RESULT_LIMIT = 30
         const val LINK_ATTEMPTS = 3
 
+        val SAFE_VIDEO_LABEL_REGEX = Regex(
+            "(?i)\\s*[\\[(](?:official\\s+)?(?:music\\s+video|lyric\\s+video|audio\\s+video|visualizer|audio|video|track|hd|hq|4k)\\b[^\\])]*[\\])]",
+        )
+        val SAFE_BRACKET_LABEL_REGEX = Regex(
+            "(?i)\\s*[\\[(](?:official|full\\s+audio|audio\\s+track|official\\s+track)[\\])]",
+        )
+        val FEATURE_REGEX = Regex(
+            "(?i)\\s*[\\[(](?:feat\\.?|ft\\.?|featuring|with)\\s+[^\\])]*[\\])]",
+        )
+
         /** Trailing "..." noise stripped from retry queries only. */
         val NOISE_SUFFIX = Regex(
-            "\\s*[\\[(](?:official\\s*(?:audio|video)|music\\s*video|lyric\\s*video|audio|video|hd|hq|4k|" +
+            "\\s*[\\[(](?:official\\s*(?:music\\s*video|lyric\\s*video|audio|video)|music\\s*video|lyric\\s*video|visualizer|audio|video|hd|hq|4k|" +
                 "remaster(?:ed)?|live|deluxe|explicit)\\b[^\\])]*[\\])]\\s*$",
             RegexOption.IGNORE_CASE,
         )
 
-        val DELIMITER_CANDIDATES = listOf(',', ';', '\t')
+        val DELIMITER_CANDIDATES = listOf(',', ';', '\t', '|')
         const val DELIMITER_SAMPLE_ROWS = 8
         /** Outweighs the raw delimiter count so a consistent split always beats
          *  a delimiter that merely appears more often. */
@@ -529,21 +673,43 @@ class CsvPlaylistImporter @Inject constructor(
 
         val UNKNOWN_ARTIST_LABELS = setOf("unknown", "unknown artist")
 
-        val TITLE_HEADERS = setOf(
-            "track name", "trackname", "title", "song", "name", "track", "song name", "songname",
-            "song title", "track title", "video title", "item", "item name", "headline", "music",
+        val INDEX_HEADERS = setOf(
+            "index", "#", "no", "no.", "number", "num", "track number", "track no",
+            "track num", "track count", "track index", "track id", "position", "pos", "order",
+            "disc", "disc number", "disc no", "disc num", "disc count", "side",
+            "duration", "duration ms", "duration_ms", "time", "length", "bpm", "year", "date",
+            "genre", "genres", "isrc", "key", "popularity", "bitrate", "added at", "added by",
         )
-        val ARTIST_HEADERS = setOf(
-            "artist name s", "artist names", "artist s", "artist", "artists", "artist name",
-            "artistname", "track artist", "track artists", "performer", "performers", "author",
-            "creator", "singer", "band", "by", "channel", "uploader",
+        val PRIMARY_TITLE_HEADERS = setOf(
+            "track name", "trackname", "song title", "songtitle", "track title", "tracktitle",
+            "song name", "songname", "title", "titles", "video title", "item name", "audio title",
+            "titre", "titres", "titulo", "titulos", "cancion", "canciones", "lied", "lieder", "titel",
         )
+        val SECONDARY_TITLE_HEADERS = setOf(
+            "song", "songs", "name", "music", "item", "headline",
+        )
+        val TITLE_HEADERS = PRIMARY_TITLE_HEADERS + SECONDARY_TITLE_HEADERS + setOf("track", "tracks")
+
+        val PRIMARY_ARTIST_HEADERS = setOf(
+            "artist name s", "artist names", "artist name", "artistname", "track artist",
+            "track artists", "lead artist", "primary artist", "main artist", "channel title",
+            "channel name", "track artist name", "artiste", "artistes", "artista", "artistas",
+            "interpret", "interpreten", "kuenstler", "künstler",
+        )
+        val SECONDARY_ARTIST_HEADERS = setOf(
+            "artist s", "artist", "artists", "channel", "uploader", "author", "creator",
+            "performer", "performers", "singer", "singers", "band", "by",
+        )
+        val ARTIST_HEADERS = PRIMARY_ARTIST_HEADERS + SECONDARY_ARTIST_HEADERS
+
         val ALBUM_HEADERS = setOf(
             "album name", "albumname", "album", "albums", "release", "collection", "record",
+            "album title", "album name s", "record title", "album_name", "album_title",
         )
         val URL_HEADERS = setOf(
             "url", "uri", "track url", "track uri", "youtube url", "video id", "videoid",
             "link", "track link", "spotify uri", "spotify url", "youtube link", "video url",
+            "spotify id", "spotify track id", "id", "yt url", "youtube", "soundcloud url",
         )
     }
 }

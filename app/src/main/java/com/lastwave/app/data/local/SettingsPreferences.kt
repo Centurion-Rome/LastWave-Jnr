@@ -56,6 +56,7 @@ enum class LyricsAnimation(val id: String, val title: String, val description: S
  *  proper nouns — no localization needed. */
 enum class LyricsProvider(val id: String, val title: String, val subtitle: String) {
     AUTO("auto", "Auto", "Fastest word-sync wins, LRCLIB fallback"),
+    LASTWAVE("lastwave", "LastWave", "Syllable & line-synced Apple lyrics first"),
     APPLE_MUSIC("apple_music", "Apple Music", "Syllable-synced Apple Music lyrics first"),
     BETTER_LYRICS("better_lyrics", "BetterLyrics", "Word-synced lyrics first"),
     KUGOU("kugou", "Kugou", "KRC word-synced lyrics first"),
@@ -65,7 +66,7 @@ enum class LyricsProvider(val id: String, val title: String, val subtitle: Strin
     LRCLIB("lrclib", "LRCLIB", "Line-synced community lyrics first");
 
     val isWordProvider: Boolean get() =
-        this == APPLE_MUSIC || this == BETTER_LYRICS || this == KUGOU ||
+        this == LASTWAVE || this == APPLE_MUSIC || this == BETTER_LYRICS || this == KUGOU ||
             this == BINI_LYRICS || this == SIMP_MUSIC || this == MUSIXMATCH
 
     companion object {
@@ -101,8 +102,6 @@ data class MiscSettings(
     val losslessQuality: Int = 27,
     /** Preferred quality preset for downloads (27: 24/192, 7: 24/96, 6: 16/44.1, 5: 320k, -1: YouTube Music). */
     val downloadQuality: Int = 27,
-    /** When true, queries for Dolby Atmos / max resolution audio. */
-    val dolbyAtmosEnabled: Boolean = false,
     /** Optional studio-clarity curve. On by default; Bit-Perfect disables it. */
     val isStudioMasterClarityEnabled: Boolean = true,
     /** Clarity output preset index (0 Reference, 1 Speaker, 2 Headphone, 3 DAC). */
@@ -266,7 +265,6 @@ class SettingsPreferences @Inject constructor(
         val DOWNLOAD_FOLDER = stringPreferencesKey("lw_download_folder")
         val DOWNLOAD_TREE_URI = stringPreferencesKey("lw_download_tree_uri")
         val DOWNLOAD_STRUCTURE = stringPreferencesKey("lw_download_structure")
-        val DOLBY_ATMOS_ENABLED = booleanPreferencesKey("lw_dolby_atmos_enabled")
         val SYSTEM_EFFECTS_MODE = booleanPreferencesKey("lw_system_effects_mode")
         val USE_ALBUM_ARTIST_FOLDERS = booleanPreferencesKey("lw_use_album_artist_folders")
         val PRIMARY_ARTIST_ONLY = booleanPreferencesKey("lw_primary_artist_only")
@@ -291,7 +289,6 @@ class SettingsPreferences @Inject constructor(
                 preferProviderModules = p.readSafely(Keys.PREFER_PROVIDER_MODULES) ?: true,
                 losslessQuality = p.readSafely(Keys.LOSSLESS_QUALITY)?.takeIf { it in LOSSLESS_QUALITIES } ?: 27,
                 downloadQuality = p.readSafely(Keys.DOWNLOAD_QUALITY)?.takeIf { it in DOWNLOAD_QUALITIES } ?: 27,
-                dolbyAtmosEnabled = p.readSafely(Keys.DOLBY_ATMOS_ENABLED) ?: false,
                 systemEffectsMode = p.readSafely(Keys.SYSTEM_EFFECTS_MODE) ?: false,
                 isStudioMasterClarityEnabled = p.readSafely(Keys.MUSIC_ENHANCER) ?: true,
                 clarityPreset = p.readSafely(Keys.CLARITY_PRESET)?.takeIf { it in 0..3 } ?: 0,
@@ -301,7 +298,7 @@ class SettingsPreferences @Inject constructor(
                 wordByWordLyrics = p.readSafely(Keys.WORD_BY_WORD_LYRICS) ?: true,
                 lyricsAnimation = LyricsAnimation.fromId(p.readSafely(Keys.LYRICS_ANIMATION)),
                 lyricsProvider = LyricsProvider.fromId(p.readSafely(Keys.LYRICS_PROVIDER)),
-                lyricsOffsetMs = (p.readSafely(Keys.LYRICS_OFFSET_MS) ?: 0L).coerceIn(-3000L, 3000L),
+                lyricsOffsetMs = (p.readSafely(Keys.LYRICS_OFFSET_MS) ?: 0L).coerceIn(-10000L, 10000L),
                 lyricsFontScale = (p.readSafely(Keys.LYRICS_FONT_SCALE) ?: 1.0f).coerceIn(0.7f, 1.5f),
                 crossfadeEnabled = p.readSafely(Keys.CROSSFADE_ENABLED) ?: false,
                 crossfadeSeconds = (p.readSafely(Keys.CROSSFADE_SECONDS) ?: 5).coerceIn(1, 12),
@@ -390,10 +387,6 @@ class SettingsPreferences @Inject constructor(
         }
     }
 
-    suspend fun setDolbyAtmosEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.DOLBY_ATMOS_ENABLED] = enabled }
-    }
-
     suspend fun setSystemEffectsMode(enabled: Boolean) {
         dataStore.edit { it[Keys.SYSTEM_EFFECTS_MODE] = enabled }
     }
@@ -431,7 +424,7 @@ class SettingsPreferences @Inject constructor(
     }
 
     suspend fun setLyricsOffsetMs(offsetMs: Long) {
-        dataStore.edit { it[Keys.LYRICS_OFFSET_MS] = offsetMs.coerceIn(-3000L, 3000L) }
+        dataStore.edit { it[Keys.LYRICS_OFFSET_MS] = offsetMs.coerceIn(-10000L, 10000L) }
     }
 
     suspend fun setLyricsFontScale(scale: Float) {

@@ -31,6 +31,7 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
     @Inject lateinit var ytMusicHistorySyncManager: dagger.Lazy<com.lastwave.app.data.ytmusic.YtMusicHistorySyncManager>
     @Inject lateinit var likedSongsManager: dagger.Lazy<com.lastwave.app.data.playlist.LikedSongsManager>
     @Inject lateinit var trackDownloadManager: dagger.Lazy<com.lastwave.app.data.download.TrackDownloadManager>
+    @Inject lateinit var discordPresenceManager: dagger.Lazy<com.lastwave.app.presence.DiscordPresenceManager>
     @Inject lateinit var appLocaleManager: dagger.Lazy<com.lastwave.app.util.AppLocaleManager>
 
     override fun attachBaseContext(base: Context) {
@@ -58,6 +59,17 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
         runCatching { com.lastwave.app.playback.PlaybackDiagnostics.install(this) }
         runCatching { com.lastwave.app.data.music.potoken.BotGuardTokenGenerator.initialize(this) }
         runCatching { com.lastwave.app.data.canvas.CanvasCache.init(this) }
+        // First-song OPUS warmup: visitorData + NewPipe + BotGuard must be
+        // ready before the first tap, not 2.5s after. Immediate and never
+        // throws; the delayed block below keeps the rest lazy.
+        applicationScope.launch(Dispatchers.IO) {
+            // NewPipe is optional fallback infrastructure. A broken extractor
+            // install must not escape an application-scope coroutine.
+            runCatching { streamExtractor.get().preWarm() }
+            // Warm the InnerTube web config (visitor data) so the first
+            // playback's direct-URL fast path can attach it immediately.
+            runCatching { innerTubeMusicApi.get().preWarmPlayback() }
+        }
         applicationScope.launch(Dispatchers.IO) {
             delay(OPTIONAL_STARTUP_DELAY_MS)
             // A process kill can bypass TrackDownloadManager's finally block
@@ -79,12 +91,6 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
                         file.lastModified() < orphanCutoff
                 }?.forEach { file -> runCatching { file.delete() } }
             }
-            // NewPipe is optional fallback infrastructure. A broken extractor
-            // install must not escape an application-scope coroutine.
-            runCatching { streamExtractor.get().preWarm() }
-            // Warm the InnerTube web config (visitor data) so the first
-            // playback's direct-URL fast path can attach it immediately.
-            runCatching { innerTubeMusicApi.get().preWarmPlayback() }
             runCatching { likedSongsManager.get().start() }
                 .onFailure { com.lastwave.app.diagnostics.AppLog.e("LastWaveStartup", "Liked Songs startup disabled", it) }
         }
@@ -112,6 +118,15 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
             delay(OPTIONAL_STARTUP_DELAY_MS)
             runCatching { trackDownloadManager.get().syncDownloadsFromStorage() }
                 .onFailure { com.lastwave.app.diagnostics.AppLog.e("LastWaveStartup", "Download sync startup failed", it) }
+        }
+        // Discord Rich Presence (no-ops unless the switch is on AND the Discord
+        // app is installed and signed in). Observes playback state only; it can
+        // never affect audio delivery, and every failure stays contained here so
+        // a missing Discord install cannot reach startup.
+        applicationScope.launch {
+            delay(OPTIONAL_STARTUP_DELAY_MS)
+            runCatching { discordPresenceManager.get().start() }
+                .onFailure { com.lastwave.app.diagnostics.AppLog.e("LastWaveStartup", "Discord presence startup disabled", it) }
         }
         // A widget is a separate RemoteViews surface, so it needs an explicit
         // refresh whenever LastWave's live theme changes. The widget's palette

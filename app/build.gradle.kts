@@ -63,6 +63,11 @@ android {
         versionCode = 26
         versionName = "4.2.6"
 
+        val lastWaveLyricsToken = resolveSecret("LASTWAVE_LYRICS_TOKEN")
+        val lastWaveLyricsUrl = resolveSecret("LASTWAVE_LYRICS_URL")
+        buildConfigField("String", "LASTWAVE_LYRICS_TOKEN", "\"$lastWaveLyricsToken\"")
+        buildConfigField("String", "LASTWAVE_LYRICS_URL", "\"$lastWaveLyricsUrl\"")
+
         // Native secrets (addon client lock) live strictly in native .so via
         // SecretsBridge_generated.h (tools/generate_native_secrets.py).
         // No secret fields are exposed in DEX / BuildConfig.
@@ -234,8 +239,9 @@ dependencies {
 
     implementation(libs.datastore.preferences)
     implementation(libs.coil.compose)
-    implementation(libs.lyrics.ui)
-    implementation(libs.lyrics.core)
+    // Lyrics sync uses the in-house reference implementation
+    // (mirrors Metrolist/SimpMusic start-based active-index + per-frame
+    // position, no external karaoke canvas). No gradle lyrics library.
     // Installs the baseline profiles bundled inside Compose (and other
     // androidx) AARs so hot UI paths are AOT-compiled on device instead of
     // running through JIT on first use — a large, zero-code smoothness win

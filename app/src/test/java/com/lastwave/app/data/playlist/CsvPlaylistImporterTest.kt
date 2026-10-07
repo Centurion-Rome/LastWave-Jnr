@@ -322,4 +322,68 @@ class CsvPlaylistImporterTest {
         assertEquals(1, result.totalRows)
         assertEquals(1, result.matchedCount)
     }
+
+    @Test
+    fun matchesOfficialVideoLabelsAndPrefixes() = runBlocking {
+        coEvery { api.fetchSongDetails(any()) } returns null
+        coEvery { api.searchSongs("Song Artist", any(), any()) } returns listOf(
+            track("12345678901", "Song (Official Music Video)", "Artist"),
+        )
+        val result = importer.parseAndMatchCsv("Track,Artist\nSong,Artist".byteInputStream(), "songs.csv")
+        assertEquals(1, result.matchedCount)
+        assertEquals("https://music.youtube.com/watch?v=12345678901", result.tracks.single().url)
+    }
+
+    @Test
+    fun matchesCollaborativeArtistsAndFeatures() = runBlocking {
+        coEvery { api.fetchSongDetails(any()) } returns null
+        coEvery { api.searchSongs(any(), any(), any()) } returns listOf(
+            track("12345678901", "Levitating", "Dua Lipa"),
+        )
+        val result = importer.parseAndMatchCsv("Track,Artist\nLevitating (feat. DaBaby),Dua Lipa, DaBaby".byteInputStream(), "songs.csv")
+        assertEquals(1, result.matchedCount)
+        assertEquals("https://music.youtube.com/watch?v=12345678901", result.tracks.single().url)
+    }
+
+    @Test
+    fun parsesPipeDelimitedAndAlternativeHeaders() {
+        val rows = importer.parseTracks("Track|Artist\nSong|Artist", "songs.csv")
+        assertEquals(listOf(CsvRawTrack("Song", "Artist")), rows)
+        val altHeaders = importer.parseTracks("Songs,Artists\nSong,Artist", "songs.csv")
+        assertEquals(listOf(CsvRawTrack("Song", "Artist")), altHeaders)
+    }
+
+    @Test
+    fun ignoresLeadingCommentsAndDirectivesInCsvFiles() {
+        val csv = "# Playlist: Chill Vibes\n# Exported by Exportify\nsep=,\nTrack Name,Artist Name\nSong,Artist"
+        val rows = importer.parseTracks(csv, "chill.csv")
+        assertEquals(listOf(CsvRawTrack("Song", "Artist")), rows)
+    }
+
+    @Test
+    fun skipsIndexAndTrackNumberColumnsCorrectly() {
+        val withTrackNum = "Track #,Title,Artist\n1,Song,Artist\n2,Other Song,Artist"
+        val rows1 = importer.parseTracks(withTrackNum, "songs.csv")
+        assertEquals(listOf(CsvRawTrack("Song", "Artist"), CsvRawTrack("Other Song", "Artist")), rows1)
+
+        val headerlessWithNumbers = "1,Song,Artist\n2,Other Song,Artist"
+        val rows2 = importer.parseTracks(headerlessWithNumbers, "songs.csv")
+        assertEquals(listOf(CsvRawTrack("Song", "Artist"), CsvRawTrack("Other Song", "Artist")), rows2)
+    }
+
+    @Test
+    fun rejectsMismatchedDifferentSongsEvenIfTitleIsSubstring() = runBlocking {
+        coEvery { api.fetchSongDetails(any()) } returns null
+        coEvery { api.searchSongs(any(), any(), any()) } returns listOf(
+            track("11111111111", "One", "Queen"),
+            track("22222222222", "Stay", "Sam Smith"),
+        )
+        val result = importer.parseAndMatchCsv(
+            "Track,Artist\nAnother One Bites the Dust,Queen\nStay With Me,Sam Smith".byteInputStream(),
+            "songs.csv",
+        )
+        assertEquals(2, result.totalRows)
+        assertEquals(0, result.matchedCount)
+        assertTrue(result.tracks.isEmpty())
+    }
 }
