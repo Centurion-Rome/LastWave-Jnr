@@ -283,6 +283,7 @@ fun HomeScreen(
                                 title = track.name,
                                 artist = track.artist,
                                 artworkUrl = track.artworkUrl,
+                                videoId = track.videoId,
                             )
                         }
                     }
