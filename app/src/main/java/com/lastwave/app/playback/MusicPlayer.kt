@@ -5693,7 +5693,19 @@ class MusicPlayer @Inject constructor(
             streamResolver.playback.begin(identity)
             return acceptResolvedIdentity(track, identity, cached)
         }
-        return resolveYoutubeTrackAudioStream(track, videoId)
+        return try {
+            resolveYoutubeTrackAudioStream(track, videoId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (remoteFailure: Exception) {
+            // Deep fallback: Room row gone (reinstall / cleared data) but the
+            // file is still on disk — walk Music/ dirs before giving up.
+            // Runs only after remote already failed, never on the hot path.
+            if (allowLocalDownloads) {
+                runCatching { resolveLocalDownloadedAudioStream(track, deepScan = true) }.getOrNull()?.let { return it }
+            }
+            throw remoteFailure
+        }
     }
 
     private suspend fun resolveLosslessTrackAudioStream(
