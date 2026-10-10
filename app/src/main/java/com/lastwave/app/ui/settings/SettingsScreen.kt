@@ -2432,11 +2432,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.7"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.8"
 } catch (error: Exception) {
-    "4.2.7"
+    "4.2.8"
 } catch (error: LinkageError) {
-    "4.2.7"
+    "4.2.8"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a

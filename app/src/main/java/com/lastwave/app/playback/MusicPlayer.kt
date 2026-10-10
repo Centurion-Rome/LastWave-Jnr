@@ -5675,6 +5675,13 @@ class MusicPlayer @Inject constructor(
         videoId: String?,
         allowLocalDownloads: Boolean = true,
     ): ResolvedStream {
+        // Fork offline fix: a downloaded file always wins. Check before the
+        // stream-cache lookup and any network so offline playback never
+        // touches the network. Shallow only (DB + MediaStore probe, no
+        // directory walk) so this stays millisecond-cheap on every resolve.
+        if (allowLocalDownloads) {
+            runCatching { resolveLocalDownloadedAudioStream(track, deepScan = false) }.getOrNull()?.let { return it }
+        }
         val directId = videoId?.takeIf { it.isNotBlank() } ?: track.videoId?.takeIf { it.isNotBlank() }
         val identity = directId?.let { id ->
             TrackIdentity(track.internalTrackId?.takeIf { it.isNotBlank() } ?: id, id)
@@ -5686,41 +5693,7 @@ class MusicPlayer @Inject constructor(
             streamResolver.playback.begin(identity)
             return acceptResolvedIdentity(track, identity, cached)
         }
-        return coroutineScope {
-            val localQuick = async(Dispatchers.IO) {
-                if (!allowLocalDownloads) null
-                else runCatching { resolveLocalDownloadedAudioStream(track, deepScan = false) }.getOrNull()
-            }
-            val youtube = async(Dispatchers.IO) {
-                resolveYoutubeTrackAudioStream(track, videoId)
-            }
-            while (true) {
-                ensureActive()
-                val localDone = localQuick.isCompleted
-                val youtubeDone = youtube.isCompleted
-                when {
-                    localDone && youtubeDone -> {
-                        val local = localQuick.await()
-                        if (local != null) return@coroutineScope local
-                        return@coroutineScope youtube.await()
-                    }
-                    localDone -> {
-                        val local = localQuick.await()
-                        if (local != null) {
-                            youtube.cancel()
-                            return@coroutineScope local
-                        }
-                        return@coroutineScope youtube.await()
-                    }
-                    youtubeDone -> {
-                        localQuick.cancel()
-                        return@coroutineScope youtube.await()
-                    }
-                }
-                delay(5)
-            }
-            error("Playback resolve race ended unexpectedly")
-        }
+        return resolveYoutubeTrackAudioStream(track, videoId)
     }
 
     private suspend fun resolveLosslessTrackAudioStream(
