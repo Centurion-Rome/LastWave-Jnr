@@ -98,6 +98,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     @Inject lateinit var themeRepository: ThemeRepository
     @Inject lateinit var artworkRepository: com.lastwave.app.data.artwork.ArtworkRepository
     @Inject lateinit var androidAutoLibrary: AndroidAutoMediaLibrary
+    @Inject lateinit var liveTelemetryRepository: com.lastwave.app.data.repository.LiveTelemetryRepository
 
     // SupervisorJob stops sibling failure propagation; the handler below
     // additionally stops an unexpected exception in any fire-and-forget
@@ -273,6 +274,9 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                 val resolvedUrl = map[key]
                 if (!resolvedUrl.isNullOrBlank() && resolvedUrl != artworkUrl) {
                     fetchArtwork(resolvedUrl)
+                    if (musicPlayer.state.value.isPlaying) {
+                        pingLiveTelemetry(current, force = true)
+                    }
                 }
             }
         }
@@ -476,7 +480,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         if (shouldHold) {
             runCatching {
                 if (playbackWakeLock?.isHeld == false) {
-                    playbackWakeLock?.acquire(60 * 60 * 1000L)
+                    playbackWakeLock?.acquire()
                 }
                 if (playbackWifiLock?.isHeld == false) {
                     playbackWifiLock?.acquire()
@@ -536,7 +540,15 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
 
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!promoteForPlayback()) return START_NOT_STICKY
+        // Promote to foreground only when playback is actually active. A
+        // pause/stop/no-op command must not force a media-playback FGS; when an
+        // action such as PLAY starts playback the state collector promotes the
+        // service on the isPlaying edge. If we do promote while active and the
+        // system refuses, bail with START_NOT_STICKY as before.
+        val state = musicPlayer.state.value
+        if (state.isPlaying || state.isBuffering) {
+            if (!promoteForPlayback()) return START_NOT_STICKY
+        }
         when (intent?.action) {
             Intent.ACTION_MEDIA_BUTTON -> androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent)
             MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH -> playCarSearch(
@@ -626,6 +638,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         if (key == detectedKey) {
             if (state.isPlaying && key != nowPlayingAnnouncedKey) {
                 announceNowPlaying(state)
+                pingLiveTelemetry(track)
             }
             return
         }
@@ -661,6 +674,25 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
 
         if (state.isPlaying) {
             announceNowPlaying(state)
+            pingLiveTelemetry(track, force = true)
+        }
+    }
+
+    private fun pingLiveTelemetry(track: PlayableTrack, force: Boolean = false) {
+        val (cleanTitle, cleanArtist) = cleanTrackMetadata(track.title, track.artist)
+        val cover = artworkUrl ?: track.artworkUrl
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                liveTelemetryRepository.ping(
+                    title = cleanTitle,
+                    artist = cleanArtist,
+                    songId = track.internalTrackId ?: track.videoId,
+                    artworkUrl = cover,
+                    force = force,
+                )
+            }.onFailure { e ->
+                android.util.Log.w("MusicPlaybackService", "Live telemetry ping error: ${e.message}")
+            }
         }
     }
 
@@ -723,6 +755,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                 // Announce Now Playing when transitioning to playing or if not yet announced
                 if (state.isPlaying && (!wasPlaying || key != nowPlayingAnnouncedKey)) {
                     announceNowPlaying(state)
+                    pingLiveTelemetry(track)
                 }
                 wasPlaying = state.isPlaying
 
@@ -735,10 +768,16 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                     submissionAttempted = false
                     retryCount = 0
                     announceNowPlaying(state)
+                    pingLiveTelemetry(track, force = true)
                 }
                 lastPositionMs = state.positionMs
 
                 accumulatedMs += 1_000
+
+                // Heartbeat to keep listener alive on global map (backend expires in 60s)
+                if (accumulatedMs > 0 && accumulatedMs % 45_000L == 0L) {
+                    pingLiveTelemetry(track, force = true)
+                }
 
                 if (submissionAttempted) continue
 
@@ -938,6 +977,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
 
     private fun publishNotification(state: MusicPlayerState, force: Boolean = false) {
         val track = state.current
+        val activelyPlaying = state.isPlaying || state.isBuffering
         if (track == null) {
             notificationSignature = ""
             if (isPlaybackForeground) {
@@ -948,7 +988,20 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
             return
         }
-        if (!isPlaybackForeground) {
+        // Paused/stopped with a track still loaded: release the foreground
+        // service privilege but keep the notification posted (DETACH), so a
+        // media-playback FGS isn't retained through an idle pause. The paused
+        // notification is still refreshed below via notify(), keeping transport
+        // controls; resume re-promotes the service on the isPlaying edge below.
+        if (!activelyPlaying && isPlaybackForeground) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_DETACH)
+            else @Suppress("DEPRECATION") stopForeground(true)
+            isPlaybackForeground = false
+        }
+        // Only startForeground() when there is something to play. While paused
+        // we stay detached (the notification remains from the DETACH above) and
+        // merely refresh it — we do not hold the FGS during idle.
+        if (!isPlaybackForeground && activelyPlaying) {
             if (!promoteForPlayback()) return
         }
         val signature = "${track.title}|${track.artist}|${track.album}|${state.isPlaying}|${state.isBuffering}|${state.shuffleEnabled}|${state.repeatMode}|$artworkUrl|${artworkBitmap != null}"

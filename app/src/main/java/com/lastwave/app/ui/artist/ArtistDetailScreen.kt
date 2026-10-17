@@ -81,7 +81,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import com.lastwave.app.R
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -169,7 +171,7 @@ fun ArtistDetailScreen(
                         )
                         Spacer(Modifier.height(16.dp))
                         Button(onClick = { viewModel.loadArtist(artistName, browseId) }) {
-                            Text("Retry")
+                            Text(stringResource(R.string.ly_retry))
                         }
                     }
                 }
@@ -312,7 +314,7 @@ fun ArtistDetailScreen(
                                         Spacer(Modifier.width(8.dp))
                                         Icon(
                                             Icons.Filled.Verified,
-                                            contentDescription = "Verified Artist",
+                                            contentDescription = stringResource(R.string.art_verified_cd),
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(24.dp),
                                         )
@@ -364,7 +366,7 @@ fun ArtistDetailScreen(
                                     ) {
                                         Icon(
                                             Icons.Filled.Shuffle,
-                                            contentDescription = "Shuffle Artist",
+                                            contentDescription = stringResource(R.string.art_shuffle_cd),
                                             modifier = Modifier.size(22.dp),
                                             tint = MaterialTheme.colorScheme.primary,
                                         )
@@ -383,7 +385,7 @@ fun ArtistDetailScreen(
                                     ) {
                                         Icon(
                                             Icons.Filled.Radio,
-                                            contentDescription = "Artist Radio",
+                                            contentDescription = stringResource(R.string.art_radio_cd),
                                             modifier = Modifier.size(22.dp),
                                             tint = MaterialTheme.colorScheme.primary,
                                         )
@@ -406,7 +408,7 @@ fun ArtistDetailScreen(
                                     Box(contentAlignment = Alignment.Center) {
                                         Icon(
                                             if (isArtistPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                            contentDescription = "Play Artist",
+                                            contentDescription = stringResource(R.string.art_play_cd),
                                             tint = MaterialTheme.colorScheme.onPrimary,
                                             modifier = Modifier.size(30.dp),
                                         )
@@ -457,7 +459,7 @@ fun ArtistDetailScreen(
                                     ) {
                                         Column(Modifier.padding(16.dp)) {
                                             Text(
-                                                text = "About",
+                                                text = stringResource(R.string.art_about),
                                                 style = MaterialTheme.typography.titleSmall,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.primary,
@@ -474,7 +476,7 @@ fun ArtistDetailScreen(
                                             if (data.bio.length > 120) {
                                                 Spacer(Modifier.height(6.dp))
                                                 Text(
-                                                    text = if (isBioExpanded) "Show less" else "... Read more",
+                                                    text = if (isBioExpanded) stringResource(R.string.details_show_less) else stringResource(R.string.art_read_more),
                                                     style = MaterialTheme.typography.labelLarge,
                                                     fontWeight = FontWeight.Bold,
                                                     color = MaterialTheme.colorScheme.primary,
@@ -600,7 +602,7 @@ fun ArtistDetailScreen(
                                     ) {
                                         Icon(
                                             Icons.Filled.MoreVert,
-                                            contentDescription = "Options",
+                                            contentDescription = stringResource(R.string.dl_options_cd),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier.size(20.dp),
                                         )
@@ -631,7 +633,7 @@ fun ArtistDetailScreen(
                                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         ) {
                                             Text(
-                                                text = if (showAllSongs) "Show less" else "Show all songs",
+                                                text = if (showAllSongs) stringResource(R.string.art_show_less_songs) else stringResource(R.string.art_show_all_songs),
                                                 style = MaterialTheme.typography.labelLarge,
                                                 fontWeight = FontWeight.SemiBold,
                                                 color = MaterialTheme.colorScheme.primary,
@@ -653,7 +655,7 @@ fun ArtistDetailScreen(
                     if (data.albums.isNotEmpty()) {
                         item(key = "albums_header") {
                             Text(
-                                text = "Albums",
+                                text = stringResource(R.string.art_albums),
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(top = 10.dp),
@@ -709,7 +711,7 @@ fun ArtistDetailScreen(
                     if (data.similarArtists.isNotEmpty()) {
                         item(key = "similar_artists_header") {
                             Text(
-                                text = "Fans Also Like",
+                                text = stringResource(R.string.art_fans_like),
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(top = 10.dp),
@@ -774,7 +776,7 @@ fun ArtistDetailScreen(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
+                        contentDescription = stringResource(R.string.pd_back_cd),
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
@@ -816,7 +818,7 @@ fun ArtistDetailScreen(
                         ),
                         modifier = Modifier.size(38.dp),
                     ) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = "Play", modifier = Modifier.size(22.dp))
+                        Icon(Icons.Filled.PlayArrow, contentDescription = stringResource(R.string.dl_play_cd), modifier = Modifier.size(22.dp))
                     }
                 }
             }

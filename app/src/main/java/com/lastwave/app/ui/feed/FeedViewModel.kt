@@ -18,9 +18,11 @@ import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.music.YouTubePlaylistSummary
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.PlayableTrack
+import com.lastwave.app.data.repository.RelatedGraphRepository
 import com.lastwave.app.data.ytmusic.YtMusicAuthManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.combine
@@ -48,17 +50,23 @@ data class FeedUiState(
 
 @HiltViewModel
 class FeedViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: android.content.Context,
     private val repository: FeedRepository,
     private val sessionPreferences: SessionPreferences,
     private val settingsPreferences: SettingsPreferences,
     private val musicPlayer: MusicPlayer,
     private val innerTube: InnerTubeMusicApi,
+    private val relatedGraph: RelatedGraphRepository,
     private val ytAuth: YtMusicAuthManager,
     private val homeRepository: com.lastwave.app.data.repository.HomeRepository,
+    private val discoverRepository: com.lastwave.app.data.discover.DiscoverRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
     val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
+    private val _discoveryTracks = MutableStateFlow<List<GeneratedTrack>>(emptyList())
+    val discoveryTracks: StateFlow<List<GeneratedTrack>> = _discoveryTracks.asStateFlow()
+
     /** Ids of Home sections the user hid in Settings → Home sections. */
     val hiddenHomeSections: StateFlow<Set<String>> = settingsPreferences.settings
         .map { it.hiddenHomeSections }
@@ -68,6 +76,7 @@ class FeedViewModel @Inject constructor(
     private var lastLoadedMillis: Long = 0L
 
     init {
+        loadDiscovery()
         viewModelScope.launch {
             ytAuth.awaitLoadedConnection()
             combine(ytAuth.connection, sessionPreferences.session) { connection, session ->
@@ -91,9 +100,24 @@ class FeedViewModel @Inject constructor(
         }
     }
 
+    fun loadDiscovery() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cached = discoverRepository.allowedCachedFeed()
+                val tracks = if (cached.isNotEmpty()) cached.take(8) else discoverRepository.nextBatch(8)
+                _discoveryTracks.value = tracks
+            } catch (_: Exception) {
+                // Non-destructive fallback if offline/failed
+            }
+        }
+    }
+
     fun loadFeed() = fetchFeed(refreshing = false)
 
-    fun refresh() = fetchFeed(refreshing = true)
+    fun refresh() {
+        loadDiscovery()
+        fetchFeed(refreshing = true)
+    }
 
     fun onVisible() {
         if (feedJob?.isActive == true) return
@@ -120,6 +144,7 @@ class FeedViewModel @Inject constructor(
     private fun fetchFeed(refreshing: Boolean) {
         feedJob?.cancel()
         feedJob = viewModelScope.launch {
+            val self = coroutineContext[Job]
             _uiState.update { it.copy(isLoading = !refreshing || it.isLoading, isRefreshing = refreshing, error = null) }
             try {
                 val connection = ytAuth.awaitLoadedConnection()
@@ -152,7 +177,16 @@ class FeedViewModel @Inject constructor(
             } catch (_: Exception) {
                 ensureActive()
                 _uiState.update {
-                    it.copy(isLoading = false, isRefreshing = false, error = "Couldn't update your feed. Please try again.")
+                    it.copy(isLoading = false, isRefreshing = false, error = appContext.getString(com.lastwave.app.R.string.feed_update_error))
+                }
+            } finally {
+                // Every exit above the success path — cancellation mid-load
+                // and the changed-identity guard — used to leave isRefreshing
+                // true, and with it a pull-to-refresh spinner that spins over
+                // fully-loaded content. Only the job that still owns the state
+                // may clear it, so a newer feed job's flags are never reset.
+                if (feedJob === self) {
+                    _uiState.update { it.copy(isRefreshing = false) }
                 }
             }
         }
@@ -222,7 +256,7 @@ class FeedViewModel @Inject constructor(
             } ?: seeds.firstOrNull()
             val related = seed?.let {
                 try {
-                    innerTube.fetchRelatedSongs(it.videoId, limit = 25, prefetchStreams = false)
+                    relatedGraph.relatedFor(it.videoId, limit = 25, prefetchStreams = false)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (_: Exception) {
@@ -251,7 +285,7 @@ class FeedViewModel @Inject constructor(
                 val seed = seeds.take(5).randomOrNull()
                 val related = seed?.let {
                     try {
-                        innerTube.fetchRelatedSongs(it.videoId, limit = 24, prefetchStreams = false)
+                        relatedGraph.relatedFor(it.videoId, limit = 24, prefetchStreams = false)
                     } catch (cancellation: CancellationException) {
                         throw cancellation
                     } catch (_: Exception) {

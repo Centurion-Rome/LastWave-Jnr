@@ -79,6 +79,8 @@ class ExclusiveUsbOutput @Inject constructor(
     private var volumeProbed = false
     @Volatile private var lastNonMaxListeningGain = Float.NaN
     @Volatile private var ignoreStreamMusicMax = false
+    /** Fork setting: never let the DAC's Feature Unit own the listening level. */
+    @Volatile private var forceSoftwareVolume = true
 
     private val audioManager: AudioManager? =
         appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -112,6 +114,7 @@ class ExclusiveUsbOutput @Inject constructor(
             if (!enabled) {
                 teardownLocked(closeDevice = true)
             } else {
+                clearBlockedDevices()
                 ensureVolumeObserverLocked()
                 syncListeningGainLocked()
             }
@@ -119,6 +122,32 @@ class ExclusiveUsbOutput @Inject constructor(
     }
 
     fun isWanted(): Boolean = wanted
+
+    /**
+     * Software (PCM-scaled) volume instead of the DAC's hardware Feature Unit.
+     * Switching to software parks the hardware level at 0 dB first so the two
+     * attenuations never stack. Switching back takes effect at the next start.
+     */
+    fun setForceSoftwareVolume(value: Boolean) {
+        synchronized(lock) {
+            if (forceSoftwareVolume == value) return
+            forceSoftwareVolume = value
+            if (value && active && hardwareVolume) {
+                runCatching { featureVolume?.setNormalized(1f) }
+                hardwareVolume = false
+                lastAppliedCombined = Float.NaN
+                applyVolumeLocked()
+                Log.i(TAG, "volume forced to software; Feature Unit parked at 0 dB")
+            }
+        }
+    }
+
+    fun isForceSoftwareVolume(): Boolean = forceSoftwareVolume
+
+    /** True when the attached DAC exposes a usable hardware volume (even if not used). */
+    fun hasHardwareVolumeControl(): Boolean = active && featureVolume != null && (hardwareVolume || featureVolumeAttached)
+
+    @Volatile private var featureVolumeAttached = false
 
     fun isActive(): Boolean = active
 
@@ -225,6 +254,11 @@ class ExclusiveUsbOutput @Inject constructor(
 
     fun syncListeningGain() {
         val stream = readStreamMusicGain() ?: return
+        // While the attach-time 100% pin is held off with the remembered
+        // level, keep ignoring pinned max readings. The next real sub-max
+        // change (a volume key press) ends the hold and applies normally.
+        if (ignoreStreamMusicMax && stream >= ATTACH_MAX_PIN_GAIN) return
+        if (stream < ATTACH_MAX_PIN_GAIN) ignoreStreamMusicMax = false
         val next = stream
         if (lastAppliedCombined.isFinite() &&
             kotlin.math.abs(next - listeningGain) < 1e-4f
@@ -451,6 +485,10 @@ class ExclusiveUsbOutput @Inject constructor(
             }
         } ?: return failLocked("no USB audio device")
         if (!manager.hasPermission(usbDevice)) return failLocked("USB permission missing")
+        blockReasonFor(usbDevice.vendorId, usbDevice.productId)?.let { reason ->
+            return failLocked("disabled for this DAC after a failed test ($reason) — turn USB Exclusive off and on to retry")
+        }
+        currentDeviceKey = "${usbDevice.vendorId}:${usbDevice.productId}"
 
         val bits = if (sourceBits > 0) sourceBits else (if (floatSource) 24 else 16)
         val reuse = stream
@@ -473,7 +511,8 @@ class ExclusiveUsbOutput @Inject constructor(
         stopStreamLocked()
         usbAudio.closeDevice()
         connection = null
-        val info = usbAudio.openDevice(usbDevice) ?: return failLocked("openDevice failed")
+        val info = usbAudio.openDevice(usbDevice)
+            ?: return failLocked("openDevice failed" + (usbAudio.lastOpenError?.let { ": $it" } ?: ""))
         val hwRates = usbAudio.querySupportedSampleRates()
 
         var effectiveRate = sampleRate
@@ -501,7 +540,7 @@ class ExclusiveUsbOutput @Inject constructor(
             }
         }
 
-        var (alt, wireBits) = usbAudio.findAltSettingForBitDepth(effectiveBits)
+        var (alt, wireBits) = usbAudio.findAltSetting(effectiveBits, effectiveRate)
         var rateSetBefore = usbAudio.setSampleRate(effectiveRate)
         if (!usbAudio.setAltSetting(alt)) return failLocked("setAltSetting $alt failed")
         var reported = usbAudio.readSampleRate()
@@ -536,7 +575,7 @@ class ExclusiveUsbOutput @Inject constructor(
             effectiveFloatSource = true
             effectiveEncoding = C.ENCODING_PCM_FLOAT
             autoNegotiatedFallback = true
-            val updatedAlt = usbAudio.findAltSettingForBitDepth(effectiveBits)
+            val updatedAlt = usbAudio.findAltSetting(effectiveBits, effectiveRate)
             if (updatedAlt.first != alt) {
                 if (usbAudio.setAltSetting(updatedAlt.first)) {
                     alt = updatedAlt.first
@@ -551,6 +590,9 @@ class ExclusiveUsbOutput @Inject constructor(
             .firstOrNull {
                 it.interfaceClass == UsbConstants.USB_CLASS_AUDIO &&
                     it.interfaceSubclass == 2 &&
+                    // Playback interface only: headset dongles also expose a
+                    // microphone AS interface with the same alt numbers.
+                    it.id == info.interfaceId &&
                     it.alternateSetting == alt &&
                     it.endpointCount > 0
             }
@@ -611,14 +653,22 @@ class ExclusiveUsbOutput @Inject constructor(
             clockMatched = rateSetBefore && !autoNegotiatedFallback
         }
         clockRechecked = true
-        val controlId = (0 until usbDevice.interfaceCount)
-            .map { usbDevice.getInterface(it) }
-            .firstOrNull {
-                it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1
-            }?.id ?: 0
-        val volumeControl = UacFeatureVolume(info.connection, controlId)
-        featureVolume = volumeControl
-        hardwareVolume = volumeControl.attach()
+        if (!forceSoftwareVolume) {
+            val controlId = (0 until usbDevice.interfaceCount)
+                .map { usbDevice.getInterface(it) }
+                .firstOrNull {
+                    it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1
+                }?.id ?: 0
+            val volumeControl = UacFeatureVolume(info.connection, controlId)
+            featureVolume = volumeControl
+            val attached = volumeControl.attach()
+            featureVolumeAttached = attached
+            hardwareVolume = attached
+        } else {
+            featureVolume = null
+            featureVolumeAttached = false
+            hardwareVolume = false
+        }
         Log.i(
             TAG,
             "decent USB started ${usbDevice.productName} ${sampleRate}Hz " +
@@ -635,8 +685,54 @@ class ExclusiveUsbOutput @Inject constructor(
             TAG,
             "exclusive volume hardware=$hardwareVolume listening=$listeningGain softwareGain=$softwareGainValue",
         )
+        sessionSummary = "started rate=${effectiveRate}Hz alt=$alt wireBits=$wireBits reported=$reported " +
+            "clockMatched=$clockMatched fallback=$autoNegotiatedFallback hardwareVolume=$hardwareVolume " +
+            "maxPacket=$maxPacket interval=$dataInterval feedback=${selectedFeedback != null}"
         startWriterLocked(created)
         return true
+    }
+
+    // ── Fork: safety guard + diagnostics ──
+
+    @Volatile private var currentDeviceKey: String? = null
+    @Volatile private var sessionSummary: String = ""
+
+    private fun blockReasonFor(vendorId: Int, productId: Int): String? =
+        volumePrefs.getString("$KEY_BLOCK_PREFIX$vendorId:$productId", null)
+
+    /** Forget every DAC the guard disabled (USB Exclusive toggled off then on). */
+    fun clearBlockedDevices() {
+        val editor = volumePrefs.edit()
+        volumePrefs.all.keys.filter { it.startsWith(KEY_BLOCK_PREFIX) }.forEach { editor.remove(it) }
+        editor.apply()
+    }
+
+    /**
+     * The DAC is not consuming the stream at the rate it was configured for
+     * and its clock was never confirmed: what it plays is garbage (loud noise
+     * on a UAC1 dongle in the field). Stop now, remember the DAC so the next
+     * track does not blast it again, and let the sink fall back.
+     */
+    fun abortUnhealthy(reason: String) {
+        synchronized(lock) {
+            if (!active) return
+            val key = currentDeviceKey
+            Log.w(TAG, "Exclusive USB aborted: $reason (device $key)")
+            if (key != null) {
+                runCatching { volumePrefs.edit().putString("$KEY_BLOCK_PREFIX$key", reason).apply() }
+            }
+            failLocked("stopped for safety: $reason")
+        }
+    }
+
+    /** Text for the signal-path "copy USB diagnostic" button. */
+    fun diagnosticReport(): String = buildString {
+        append("LastWave USB diagnostic\n")
+        append("active=$active wanted=$wanted rate=$configuredRateHz clockMatched=$clockMatched ")
+        append("hardwareVolume=$hardwareVolume forceSoftwareVolume=$forceSoftwareVolume\n")
+        if (sessionSummary.isNotEmpty()) append(sessionSummary).append('\n')
+        lastFailureReason?.let { append("lastFailure=").append(it).append('\n') }
+        append(runCatching { usbAudio.diagnosticReport() }.getOrDefault(""))
     }
 
     @Volatile private var currentFallbackNegotiated = false
@@ -681,15 +777,24 @@ class ExclusiveUsbOutput @Inject constructor(
     }
 
     private fun rememberStreamGain(gain: Float?) {
-        if (gain != null && gain in 0.01f..0.999f) {
+        if (gain != null && gain in MIN_REMEMBERED_GAIN..ATTACH_MAX_PIN_GAIN) {
             lastNonMaxListeningGain = gain
             runCatching { volumePrefs.edit().putFloat(KEY_LAST_NON_MAX_GAIN, gain).apply() }
         }
     }
 
     private fun listeningGainForDac(): Float {
+        val stream = readStreamMusicGain() ?: return listeningGain
+        attachMaxPinFallbackGain(stream, lastNonMaxListeningGain)?.let { remembered ->
+            ignoreStreamMusicMax = true
+            Log.i(
+                TAG,
+                "STREAM_MUSIC pinned at max on attach; using remembered listening gain $remembered",
+            )
+            return remembered
+        }
         ignoreStreamMusicMax = false
-        return readStreamMusicGain() ?: listeningGain
+        return stream
     }
 
     private fun syncListeningGainLocked() {
@@ -726,6 +831,14 @@ class ExclusiveUsbOutput @Inject constructor(
         thread.start()
     }
 
+    /**
+     * Signal the writer thread to exit, drop queued PCM, and wait for it to
+     * finish. The join is unbounded on purpose: a timeout here is what let the
+     * old code release() the native context while the writer was still inside
+     * write() — a use-after-free. Callers MUST stop the native stream first
+     * (see [stopStreamLocked]) so a write() blocked on a full URB ring returns
+     * and this join is guaranteed to terminate.
+     */
     private fun stopWriterLocked() {
         writerStop = true
         synchronized(pcmLock) {
@@ -733,7 +846,7 @@ class ExclusiveUsbOutput @Inject constructor(
             queuedBytes = 0
             pcmLock.notifyAll()
         }
-        writer?.join(2_000)
+        writer?.join()
         writer = null
     }
 
@@ -776,11 +889,20 @@ class ExclusiveUsbOutput @Inject constructor(
     }
 
     private fun stopStreamLocked() {
+        val running = stream
+        // Stop the native stream FIRST. This flips running=false so a write()
+        // blocked on a full URB ring returns (the native reap loop wakes roughly
+        // every 200ms and breaks). Only then can stopWriterLocked()'s unbounded
+        // join() terminate — joining before stop() would always time out and
+        // leave the writer alive.
+        runCatching { running?.stop() }
         stopWriterLocked()
-        val running = stream ?: return
-        runCatching { running.stop() }
-        runCatching { running.drainUrbs() }
-        runCatching { running.release() }
+        // The writer thread is now guaranteed dead, so releasing native state is
+        // safe. Releasing it while the writer was still alive was a use-after-free.
+        if (running != null) {
+            runCatching { running.drainUrbs() }
+            runCatching { running.release() }
+        }
         stream = null
         active = false
     }
@@ -792,6 +914,7 @@ class ExclusiveUsbOutput @Inject constructor(
             connection = null
         }
         featureVolume = null
+        featureVolumeAttached = false
         volumeProbed = false
         ignoreStreamMusicMax = false
         hardwareVolume = false
@@ -827,6 +950,7 @@ class ExclusiveUsbOutput @Inject constructor(
         const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
         const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
         const val KEY_LAST_NON_MAX_GAIN = "last_non_max_stream_gain"
+        const val KEY_BLOCK_PREFIX = "blocked_dac_"
         const val PLL_SETTLE_MS = 50L
         const val CLOCK_VALID_TRIES = 40
         const val CLOCK_VALID_STEP_MS = 5L
@@ -866,3 +990,26 @@ class ExclusiveUsbOutput @Inject constructor(
         }
     }
 }
+
+/**
+ * Gain to use when a raw STREAM_MUSIC read is the attach-time 100% pin.
+ *
+ * Android reports the media volume pinned at max the moment a USB DAC
+ * attaches, while the user's real level is still the last non-max volume-key
+ * press. Applying the pinned reading at full scale is what boosted the
+ * volume to 100 on every remove/re-attach. The remembered level is what the
+ * user hears on their next key press, so it wins while the read is pinned.
+ * Null means the raw reading is trustworthy.
+ */
+internal fun attachMaxPinFallbackGain(streamGain: Float, rememberedGain: Float): Float? {
+    if (streamGain < ATTACH_MAX_PIN_GAIN) return null
+    if (!rememberedGain.isFinite()) return null
+    if (rememberedGain < MIN_REMEMBERED_GAIN || rememberedGain > ATTACH_MAX_PIN_GAIN) return null
+    return rememberedGain
+}
+
+/** Raw readings at/above this are the attach-time pin, not a chosen level. */
+private const val ATTACH_MAX_PIN_GAIN = 0.999f
+
+/** Quietest level remembered as the user's real listening gain. */
+private const val MIN_REMEMBERED_GAIN = 0.01f

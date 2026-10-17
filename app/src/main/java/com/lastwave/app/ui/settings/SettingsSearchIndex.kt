@@ -33,9 +33,12 @@ import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.MaterialTheme
@@ -181,6 +184,23 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
+                    id = "audio.keep_lyrics_screen_awake",
+                    title = "Keep Screen Awake on Lyrics",
+                    subtitle = "Prevent screen from turning off while viewing lyrics",
+                    keywords = listOf(
+                        "keep screen awake", "keep screen on", "lyrics sleep", "screen timeout",
+                        "display awake", "lyrics screen"
+                    ),
+                    icon = Icons.Filled.Lyrics,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Audio & Playback",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
                     id = "audio.download_lyrics",
                     title = "Download Lyrics",
                     subtitle = "Save .lrc companion files & embed lyrics in downloaded tracks",
@@ -225,6 +245,39 @@ object SettingsSearchIndex {
                     icon = Icons.Filled.Usb,
                     iconContainer = { MaterialTheme.colorScheme.primaryContainer },
                     iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Output & Loudness",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "audio.internal_direct",
+                    title = "Internal direct output",
+                    subtitle = "Bypass the Android mixer on the speaker / jack without a USB DAC",
+                    keywords = listOf(
+                        "direct", "mixer", "bypass", "hires direct", "uapp", "aaudio", "mmap",
+                        "exclusive", "sortie directe", "interne", "contourner", "speaker", "jack",
+                    ),
+                    icon = Icons.Filled.SpeakerPhone,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Output & Loudness",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "audio.force_software_volume",
+                    title = "Software volume (USB DAC)",
+                    subtitle = "Scale volume in the app instead of the DAC's hardware volume",
+                    keywords = listOf(
+                        "volume", "software volume", "hardware volume", "dac", "logiciel", "matériel",
+                    ),
+                    icon = Icons.Filled.VolumeUp,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
                     parentTab = SettingsTab.AUDIO,
                     section = "Output & Loudness",
                     type = EntryType.TOGGLE,
@@ -406,6 +459,23 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
+                    id = "appearance.md3_nav_bar",
+                    title = "Material 3 Navigation Bar",
+                    subtitle = "Classic full-width bottom navigation bar instead of the floating dock",
+                    keywords = listOf(
+                        "md3", "material 3", "navigation bar", "bottom bar", "nav bar",
+                        "dock", "floating dock", "full width nav"
+                    ),
+                    icon = Icons.Filled.Apps,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Appearance",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
                     id = "appearance.dynamic_now_playing",
                     title = "Dynamic Now Playing Screen",
                     subtitle = "Adaptive color background on the now playing screen driven by album art",
@@ -568,6 +638,40 @@ object SettingsSearchIndex {
                         "bigger lyrics", "smaller lyrics", "lyrics scale", "lyrics zoom"
                     ),
                     icon = Icons.Filled.FormatSize,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.lyrics_autohide",
+                    title = "Hide Lyrics Buttons",
+                    subtitle = "Idle time before the floating lyrics buttons fade out (2-10 s or Never)",
+                    keywords = listOf(
+                        "hide lyrics buttons", "auto hide", "idle", "fade out", "lyrics controls",
+                        "font size button", "fullscreen button", "never", "seconds", "timeout"
+                    ),
+                    icon = Icons.Filled.VisibilityOff,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.translation_language",
+                    title = "Translation Language",
+                    subtitle = "Language the lyrics translate button turns songs into (blank follows the app language)",
+                    keywords = listOf(
+                        "translation language", "translate lyrics", "lyrics language", "romanization",
+                        "romanize", "language of lyrics", "translate to", "lyrics translate"
+                    ),
+                    icon = Icons.Filled.Translate,
                     iconContainer = { MaterialTheme.colorScheme.primaryContainer },
                     iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
                     parentTab = SettingsTab.APPEARANCE,

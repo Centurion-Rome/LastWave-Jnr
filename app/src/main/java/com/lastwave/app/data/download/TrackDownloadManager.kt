@@ -850,9 +850,11 @@ class TrackDownloadManager @Inject constructor(
                                     val depth = losslessStream.bitDepth.takeIf { it > 0 }
                                     formatBadge = when {
                                         isAtmosStream -> "DOLBY ATMOS"
+                                        losslessStream.formatId == LosslessMusicApi.QUALITY_MP3_320 -> "320 kbps"
+                                        losslessStream.formatId == LosslessMusicApi.QUALITY_DATA_SAVER -> "96 kbps"
                                         isFlacStream -> formatDetailedQualityBadge(depth, rateKHz)
-                                        manifestCodec.startsWith("mp4a.40.5") -> "HE-AAC"
-                                        manifestCodec.startsWith("mp4a") -> "AAC 320"
+                                        manifestCodec.startsWith("mp4a.40.5") -> "96 kbps"
+                                        manifestCodec.startsWith("mp4a") -> "320 kbps"
                                         else -> "AAC"
                                     }
                                     isLossless = isAtmosStream || isFlacStream
@@ -866,15 +868,24 @@ class TrackDownloadManager @Inject constructor(
                                 extension = when {
                                     mimeType.contains("mp3", ignoreCase = true) -> "mp3"
                                     isAtmosStream || mimeType.contains("mp4", ignoreCase = true) || mimeType.contains("m4a", ignoreCase = true) -> "m4a"
+                                    mimeType.contains("aac", ignoreCase = true) -> "m4a"
+                                    mimeType.contains("opus", ignoreCase = true) || mimeType.contains("ogg", ignoreCase = true) -> "opus"
                                     else -> "flac"
                                 }
-                                isLossless = !extension.equals("mp3", ignoreCase = true)
+                                isLossless = !extension.equals("mp3", ignoreCase = true) &&
+                                    !extension.equals("m4a", ignoreCase = true) &&
+                                    !extension.equals("opus", ignoreCase = true) &&
+                                    losslessStream.formatId != LosslessMusicApi.QUALITY_MP3_320 &&
+                                    losslessStream.formatId != LosslessMusicApi.QUALITY_DATA_SAVER &&
+                                    !mimeType.contains("aac", ignoreCase = true)
                                 val rateKHz = if (losslessStream.samplingRate > 1000.0) losslessStream.samplingRate / 1000.0 else losslessStream.samplingRate
                                 val depth = losslessStream.bitDepth.takeIf { it > 0 }
                                 formatBadge = when {
                                     isAtmosStream -> "DOLBY ATMOS"
+                                    losslessStream.formatId == LosslessMusicApi.QUALITY_MP3_320 -> "320 kbps"
+                                    losslessStream.formatId == LosslessMusicApi.QUALITY_DATA_SAVER -> "96 kbps"
                                     isLossless -> formatDetailedQualityBadge(depth, rateKHz)
-                                    else -> "MP3"
+                                    else -> if (extension.equals("mp3", ignoreCase = true)) "MP3" else "AAC"
                                 }
                                 durationMs = (losslessStream.durationSeconds * 1000L).takeIf { it > 0 } ?: 0L
                             }
@@ -951,8 +962,8 @@ class TrackDownloadManager @Inject constructor(
                                     formatBadge = when {
                                         isAtmosStream -> "DOLBY ATMOS"
                                         isFlacStream -> formatDetailedQualityBadge(depth, rateKHz)
-                                        manifestCodec.startsWith("mp4a.40.5") -> "HE-AAC"
-                                        manifestCodec.startsWith("mp4a") -> "AAC 320"
+                                        manifestCodec.startsWith("mp4a.40.5") -> "96 kbps"
+                                        manifestCodec.startsWith("mp4a") -> "320 kbps"
                                         else -> "AAC"
                                     }
                                     isLossless = isAtmosStream || isFlacStream
@@ -969,7 +980,10 @@ class TrackDownloadManager @Inject constructor(
                                 extension = "m4a"
                                 mimeType = "audio/mp4"
                                 formatBadge = segBridge.audioBadge(desc)
-                                isLossless = !s.codec.equals("opus", ignoreCase = true)
+                                isLossless = !s.codec.equals("opus", ignoreCase = true) &&
+                                    !s.codec.equals("mp3", ignoreCase = true) &&
+                                    !s.codec.equals("aac", ignoreCase = true) &&
+                                    !s.codec.contains("mp4a", ignoreCase = true)
                                 durationMs = desc.durationSec * 1000L
                                 // Offline license in parallel with the bytes.
                                 moduleLicenseDeferred = applicationScope.async(Dispatchers.IO) {
@@ -2238,9 +2252,9 @@ class TrackDownloadManager @Inject constructor(
         }
         if (count <= 0) {
             val durationMatch = Regex("""mediaPresentationDuration=["']PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?["']""", RegexOption.IGNORE_CASE).find(xmlStr)
-            val segTemplateMatch = Regex("""<SegmentTemplate\b[^>]*>""", RegexOption.IGNORE_CASE).find(xmlStr)?.value
-            val segDuration = segTemplateMatch?.let { Regex("""\bduration=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
-            val timescale = segTemplateMatch?.let { Regex("""\btimescale=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
+            val segTemplateMatch = Regex("""<(?:SegmentTemplate|SegmentList)\b[^>]*>""", RegexOption.IGNORE_CASE).find(xmlStr)?.value
+            val segDuration = segTemplateMatch?.let { Regex("""\bduration=["']([0-9.]+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
+            val timescale = segTemplateMatch?.let { Regex("""\btimescale=["']([0-9.]+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
             if (durationMatch != null) {
                 val hours = durationMatch.groupValues.getOrNull(1)?.toDoubleOrNull() ?: 0.0
                 val min = durationMatch.groupValues.getOrNull(2)?.toDoubleOrNull() ?: 0.0
