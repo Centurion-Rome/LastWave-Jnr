@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.2.9] - 2026-10-17
+
+Upstream sync from `Clash-Projects/LastWave-Native`, merging 72 commits
+(`676bff5`..`3c200fd`) on top of the v4.2.8 fork point.
+
+### Changed
+- **Upstream sync** from `Clash-Projects/LastWave-Native` (72 commits):
+  playback recovery, local songs, lyrics, related-track graph, direct audio
+  and localization updates. Conflicts in `MusicPlayer`, `FeedScreen` and
+  `PlayerHost` resolved without dropping fork behavior.
+- **Version bump** to 4.2.9 (versionCode 29).
+
+### Notes
+- The fork's offline-first shallow resolution with deep fallback after
+  remote failure, analog VU meter real-bass wiring (including tablet
+  landscape) and API 24/25 audio-focus guard all survived.
+- No other user-facing changes from this commit.
+
 ## [4.2.7] - 2026-10-07
 
 Fifth upstream sync from `Clash-Projects/LastWave-Native`, merging 72 commits
