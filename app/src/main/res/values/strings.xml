@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="vu_open_fullscreen">Open fullscreen stereo VU meters</string>
+    <string name="vu_close">Close fullscreen VU meters</string>
+    <string name="vu_left">Left</string>
+    <string name="vu_right">Right</string>
+    <string name="vu_nothing_playing">Nothing playing</string>
+    <string name="vu_play">Play</string>
+    <string name="vu_pause">Pause</string>
     <string name="app_name">LastWave-Jnr</string>
     <string name="widget_name">LastWave-Jnr Player</string>
     <string name="widget_description">Artwork, track details and playback controls for every media app</string>

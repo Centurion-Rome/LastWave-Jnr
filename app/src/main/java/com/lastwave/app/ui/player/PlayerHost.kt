@@ -770,6 +770,8 @@ fun PlayerHost(
     val playbackState by viewModel.player.state.collectAsStateWithLifecycle()
     val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
     var expanded by rememberSaveable { mutableStateOf(false) }
+    var showVuMeter by rememberSaveable { mutableStateOf(false) }
+    val openVuMeter = remember { { showVuMeter = true } }
     var currentTab by rememberSaveable { mutableStateOf(FullPlayerTab.NOW_PLAYING) }
     var playlistTrack by remember { mutableStateOf<PlayableTrack?>(null) }
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -846,6 +848,7 @@ fun PlayerHost(
         LocalAddToPlaylist provides requestAddToPlaylist,
         LocalMiniPlayerScrollClearance provides if (state.current != null) 88.dp else 0.dp,
         LocalBottomNavSlot provides bottomNavSlot,
+        com.lastwave.app.ui.common.LocalOpenVuMeter provides openVuMeter,
     ) {
         Box(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize().liquidGlassSource(if (miniGlass) miniBackdrop else null)) {
@@ -961,6 +964,9 @@ fun PlayerHost(
                         playlistTrack = null
                     },
                 )
+            }
+            if (showVuMeter) {
+                FullscreenVuMeter(player = viewModel.player, onClose = { showVuMeter = false })
             }
         }
     }
@@ -3527,7 +3533,7 @@ internal fun PlayerProgressSlider(
 }
 
 @Composable
-private fun SeekBar(
+internal fun SeekBar(
     progressState: StateFlow<PlaybackProgressState>,
     isPlaying: Boolean,
     trackKey: String?,

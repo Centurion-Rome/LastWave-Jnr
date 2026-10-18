@@ -31,7 +31,7 @@ import kotlin.math.sqrt
  * Plain Kotlin object (not Hilt): the processor is constructed manually and
  * the UI collects the flow directly. Never throws — metering must not break
  * playback. When no data flows (paused, fallback sink, Cast) the flow goes
- * stale and the UI falls back to its simulated groove.
+ * stale: compact meters simulate a groove; fullscreen stereo meters rest.
  */
 object AudioLevelMonitor {
 
@@ -39,7 +39,11 @@ object AudioLevelMonitor {
         val bass: Float = 0f,
         val energy: Float = 0f,
         val updatedMs: Long = 0L,
-    )
+        val left: Float = 0f,
+        val right: Float = 0f,
+    ) {
+        fun isFresh(nowMs: Long): Boolean = updatedMs > 0L && nowMs - updatedMs in 0L..399L
+    }
 
     private const val BASS_CUTOFF_HZ = 180f
     /** Hard peak ceiling: 90% of the needle sweep, just past 0 dB. */
@@ -69,13 +73,19 @@ object AudioLevelMonitor {
     @Volatile private var peakBass = PEAK_FLOOR
     @Volatile private var peakEnergy = PEAK_FLOOR
     @Volatile private var lastPublishMs = 0L
+    private val channelLowPass = FloatArray(2)
+    private val channelBassSq = DoubleArray(2)
+    private val channelEnergySq = DoubleArray(2)
+    private val channelBass = FloatArray(2)
+    private val channelEnergy = FloatArray(2)
+    private var stereoPeakBass = PEAK_FLOOR
+    private var stereoPeakEnergy = PEAK_FLOOR
 
     fun onProcessedPcm(output: ByteBuffer, frameCount: Int, channelCount: Int, sampleRateHz: Int) {
         if (frameCount <= 0 || channelCount !in 1..2 || sampleRateHz <= 0) return
         try {
             val fb = output.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
-            val totalFloats = frameCount * channelCount
-            if (fb.capacity() < totalFloats) return
+            if (frameCount > fb.capacity() / channelCount) return
             // Bound cost: at most ~512 sampled frames per call.
             val step = maxOf(1, frameCount / 512)
             val alpha = (1f - exp(-2f * PI.toFloat() * BASS_CUTOFF_HZ / sampleRateHz.toFloat()))
@@ -87,6 +97,13 @@ object AudioLevelMonitor {
             var f = 0
             while (f < frameCount) {
                 val base = f * channelCount
+                for (channel in 0..1) {
+                    val sample = fb.get(base + if (channelCount == 1) 0 else channel)
+                        .takeIf { it.isFinite() } ?: 0f
+                    channelLowPass[channel] += alpha * (sample - channelLowPass[channel])
+                    channelBassSq[channel] += (channelLowPass[channel] * channelLowPass[channel]).toDouble()
+                    channelEnergySq[channel] += (sample * sample).toDouble()
+                }
                 val x = if (channelCount == 2) {
                     (fb.get(base) + fb.get(base + 1)) * 0.5f
                 } else {
@@ -115,6 +132,17 @@ object AudioLevelMonitor {
         lastPublishMs = now
         val rmsBass = sqrt(accBassSq / accN).toFloat().coerceIn(0f, 2f)
         val rmsEng = sqrt(accEngSq / accN).toFloat().coerceIn(0f, 2f)
+        for (channel in 0..1) {
+            val bass = sqrt(channelBassSq[channel] / accN).toFloat().coerceIn(0f, 2f)
+            val energy = sqrt(channelEnergySq[channel] / accN).toFloat().coerceIn(0f, 2f)
+            channelBass[channel] += (bass - channelBass[channel]) * VU_ALPHA
+            channelEnergy[channel] += (energy - channelEnergy[channel]) * VU_ALPHA
+            channelBassSq[channel] = 0.0
+            channelEnergySq[channel] = 0.0
+        }
+        // One reference for both channels preserves pan and relative loudness.
+        stereoPeakBass = maxOf(channelBass[0], channelBass[1], stereoPeakBass * PEAK_DECAY, PEAK_FLOOR)
+        stereoPeakEnergy = maxOf(channelEnergy[0], channelEnergy[1], stereoPeakEnergy * PEAK_DECAY, PEAK_FLOOR)
         accBassSq = 0.0
         accEngSq = 0.0
         accN = 0L
@@ -135,8 +163,14 @@ object AudioLevelMonitor {
             bass = mixed * PEAK_CEILING,
             energy = normEnergy * PEAK_CEILING,
             updatedMs = now,
+            left = stereoLevel(0),
+            right = stereoLevel(1),
         )
     }
+
+    private fun stereoLevel(channel: Int): Float =
+        (channelBass[channel] / stereoPeakBass * 0.75f +
+            channelEnergy[channel] / stereoPeakEnergy * 0.25f).coerceIn(0f, 1f) * PEAK_CEILING
 
     fun reset() {
         lpY = 0f
@@ -147,5 +181,14 @@ object AudioLevelMonitor {
         vuEnergy = 0f
         peakBass = PEAK_FLOOR
         peakEnergy = PEAK_FLOOR
+        channelLowPass.fill(0f)
+        channelBassSq.fill(0.0)
+        channelEnergySq.fill(0.0)
+        channelBass.fill(0f)
+        channelEnergy.fill(0f)
+        stereoPeakBass = PEAK_FLOOR
+        stereoPeakEnergy = PEAK_FLOOR
+        lastPublishMs = 0L
+        _levels.value = Levels()
     }
 }

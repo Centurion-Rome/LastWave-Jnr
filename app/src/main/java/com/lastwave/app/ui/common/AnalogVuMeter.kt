@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,11 +33,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.random.Random
+
+val LocalOpenVuMeter = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
  * Old-school HiFi analog VU meter with a glowing yellow-orange backlight.
@@ -50,7 +60,10 @@ fun AnalogVuMeter(
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
     level: Float? = null,
+    meterHeight: Dp = 132.dp,
 ) {
+    val openMeter = LocalOpenVuMeter.current
+    val openLabel = stringResource(com.lastwave.app.R.string.vu_open_fullscreen)
     var simulatedTarget by remember { mutableFloatStateOf(0f) }
 
     // Bass-first pseudo-dB generator (~9 ticks/sec, fallback only when no
@@ -114,6 +127,12 @@ fun AnalogVuMeter(
     // Walnut frame + amber halo.
     Box(
         modifier = modifier
+            .then(if (openMeter == null) Modifier else Modifier
+                .pointerInput(openMeter) { detectTapGestures(onDoubleTap = { openMeter() }) }
+                .semantics {
+                    contentDescription = openLabel
+                    onClick(label = openLabel) { openMeter(); true }
+                })
             .shadow(
                 elevation = (10 + 14 * glowBoost).dp,
                 shape = RoundedCornerShape(18.dp),
@@ -129,7 +148,7 @@ fun AnalogVuMeter(
             .padding(5.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0xFFFFC64D))
-            .height(132.dp)
+            .height(meterHeight)
             .fillMaxWidth(),
     ) {
         Canvas(Modifier.fillMaxSize()) {
