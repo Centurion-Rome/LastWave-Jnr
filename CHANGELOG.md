@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.3.2] - 2026-10-20
+
+### Changed
+- Merge upstream `Clash-Projects/LastWave-Native` through `0e7044be`, including
+  Spotify integration, podcasts, AutoEQ, download restoration and lyrics sharing.
+- Preserve the fork's analog VU meters (including fullscreen) and offline download playback.
+- Fix Spotify settings section nesting and update the audio-focus test fixture for the merged player dependencies.
+- Bump the fork to version 4.3.2 (versionCode 32).
+
 ## [4.2.9] - 2026-10-17
 
 Upstream sync from `Clash-Projects/LastWave-Native`, merging 72 commits
