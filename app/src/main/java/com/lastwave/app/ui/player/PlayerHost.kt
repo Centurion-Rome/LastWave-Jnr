@@ -19,6 +19,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.lastwave.app.ui.common.PredictiveBackScreen
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -369,6 +371,7 @@ class PlayerViewModel @Inject constructor(
 
     private var currentTrackLyricsKey: String? = null
     private var lyricsJob: Job? = null
+    private var spotLyricsOverride: Pair<com.lastwave.app.data.local.LyricsProvider?, Set<com.lastwave.app.data.local.LyricsProvider>> = Pair(null, emptySet())
 
     private val _canvasState = MutableStateFlow<com.lastwave.app.data.canvas.CanvasArtwork?>(null)
     val canvasState = _canvasState.asStateFlow()
@@ -406,6 +409,7 @@ class PlayerViewModel @Inject constructor(
                 val key = track?.let { "${it.videoId ?: ""}|${it.artist}|${it.title}|$wordByWord" }
                 if (key != currentTrackLyricsKey) {
                     currentTrackLyricsKey = key
+                    spotLyricsOverride = Pair(null, emptySet())
                     if (track != null) {
                         loadLyrics(track, forceRefresh = false)
                     } else {
@@ -424,7 +428,7 @@ class PlayerViewModel @Inject constructor(
                 if (key != currentCanvasTrackKey) {
                     currentCanvasTrackKey = key
                     canvasJob?.cancel()
-                    if (track != null && enabled) {
+                    if (track != null && enabled && track.mediaType != com.lastwave.app.playback.MediaType.PODCAST_EPISODE) {
                         _canvasState.value = canvasRepository.cached(track)
                         canvasJob = viewModelScope.launch {
                             waitUntilAudible(track)
@@ -507,7 +511,39 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    fun loadLyrics(track: PlayableTrack, forceRefresh: Boolean = false) {
+    fun selectLyricsProvider(provider: com.lastwave.app.data.local.LyricsProvider) {
+        val track = player.state.value.current ?: return
+        spotLyricsOverride = Pair(provider, emptySet())
+        loadLyrics(track, forceRefresh = true, overrideProvider = provider, excludedProviders = emptySet())
+    }
+
+    fun tryAnotherLyricsSource() {
+        val track = player.state.value.current ?: return
+        val currentSource = (_lyricsState.value as? LyricsUiState.Success)?.source
+        val currentProvider = com.lastwave.app.data.lyrics.providerForSource(currentSource)
+        val newExcluded = if (currentProvider != null) {
+            spotLyricsOverride.second + currentProvider
+        } else {
+            spotLyricsOverride.second
+        }
+        spotLyricsOverride = Pair(null, newExcluded)
+        loadLyrics(track, forceRefresh = true, overrideProvider = null, excludedProviders = newExcluded)
+    }
+
+    fun loadLyrics(
+        track: PlayableTrack,
+        forceRefresh: Boolean = false,
+        overrideProvider: com.lastwave.app.data.local.LyricsProvider? = spotLyricsOverride.first,
+        excludedProviders: Set<com.lastwave.app.data.local.LyricsProvider> = spotLyricsOverride.second,
+    ) {
+        if (track.mediaType == com.lastwave.app.playback.MediaType.PODCAST_EPISODE) {
+            // Podcast episodes have no lyrics: skip every provider instead of
+            // burning a lookup on a title that can never match.
+            lyricsJob?.cancel()
+            lyricsJob = null
+            _lyricsState.value = LyricsUiState.Idle
+            return
+        }
         lyricsJob?.cancel()
         lyricsJob = viewModelScope.launch {
             // Lyrics hit other hosts (LRCLIB, Apple, SimpMusic). Starting
@@ -543,6 +579,8 @@ class PlayerViewModel @Inject constructor(
                         localLrcPath = com.lastwave.app.data.generate.LocalAudioFormats
                             .importedPathOrNull(track.playbackUrl)
                             ?.let(com.lastwave.app.data.generate.LocalAudioFormats::lrcPathFor),
+                        overrideProvider = overrideProvider,
+                        excludedProviders = excludedProviders,
                         onPartialResult = { partial ->
                             withContext(Dispatchers.Main.immediate) {
                                 coroutineContext.ensureActive()
@@ -1000,6 +1038,7 @@ private fun ExpandedPlayer(
         lyricsState = lyricsState,
         wavySeekbarEnabled = settings.wavySeekbarEnabled,
         rotatingBackgroundEnabled = settings.rotatingBackgroundEnabled,
+        lyricsRotatingBackgroundEnabled = settings.lyricsRotatingBackgroundEnabled,
         lyricsOffsetMs = lyricsOffsetMs,
         onSetLyricsOffsetMs = viewModel::setLyricsOffsetMs,
         lyricsFontScale = settings.lyricsFontScale,
@@ -1018,6 +1057,8 @@ private fun ExpandedPlayer(
         onToggleLiked = { currentTrack?.let(viewModel::toggleLiked) },
         onDoubleTapLike = { currentTrack?.let(viewModel::like) },
         onDragStatusChange = onDragStatusChange,
+        onSelectLyricsProvider = viewModel::selectLyricsProvider,
+        onTryAnotherLyricsSource = viewModel::tryAnotherLyricsSource,
     )
 }
 
@@ -1816,6 +1857,7 @@ private fun FullPlayer(
     lyricsState: LyricsUiState,
     wavySeekbarEnabled: Boolean = true,
     rotatingBackgroundEnabled: Boolean = true,
+    lyricsRotatingBackgroundEnabled: Boolean = true,
     lyricsOffsetMs: Long = 0L,
     onSetLyricsOffsetMs: ((Long) -> Unit)? = null,
     lyricsFontScale: Float = 1.0f,
@@ -1836,6 +1878,8 @@ private fun FullPlayer(
     onToggleLiked: () -> Unit = {},
     onDoubleTapLike: () -> Unit = {},
     onDragStatusChange: (Boolean) -> Unit = {},
+    onSelectLyricsProvider: ((com.lastwave.app.data.local.LyricsProvider) -> Unit)? = null,
+    onTryAnotherLyricsSource: (() -> Unit)? = null,
 ) {
     val track = state.current ?: return
     var showLyricsOffsetDialog by remember { mutableStateOf(false) }
@@ -1871,6 +1915,7 @@ private fun FullPlayer(
     // moment a track without a canvas starts.
     var canvasCover by remember { mutableFloatStateOf(0f) }
     var lyricsFullscreen by remember(currentTab) { mutableStateOf(false) }
+    var lyricsControlsVisible by remember(currentTab) { mutableStateOf(true) }
     val view = LocalView.current
     DisposableEffect(view, lyricsFullscreen) {
         val fullscreenActive = lyricsFullscreen
@@ -2019,10 +2064,14 @@ private fun FullPlayer(
             val bgMaxDimension = maxOf(bgWidth, bgHeight, 1f)
             var heroBottomPx by remember { mutableFloatStateOf(0f) }
 
+            val isLyricsTab = currentTab == FullPlayerTab.LYRICS
+            val showLyricsFluid = lyricsRotatingBackgroundEnabled && rotatingBackgroundEnabled
             // Drives the Now Playing <-> Lyrics backdrop hand-over: the fluid
-            // layer fades out while the full-bleed cover backdrop fades in.
+            // layer fades out while the full-bleed cover backdrop fades in when
+            // lyrics rotating background is disabled. When enabled, the fluid
+            // background stays active across tabs.
             val lyricsVeil by animateFloatAsState(
-                targetValue = if (currentTab == FullPlayerTab.LYRICS) 1f else 0f,
+                targetValue = if (isLyricsTab && !showLyricsFluid) 1f else 0f,
                 animationSpec = tween(350),
                 label = "lyricsVeil",
             )
@@ -2032,11 +2081,9 @@ private fun FullPlayer(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer { alpha = (1f - lyricsVeil).coerceIn(0f, 1f) },
-                    // The lyrics tab crossfades the fluid out for a dedicated
-                    // cover backdrop (below); freezing the loop there keeps the
-                    // shader idle while the lyrics tab is up.
-                    extraBlur = currentTab == FullPlayerTab.LYRICS,
-                    rotatingBackgroundEnabled = rotatingBackgroundEnabled,
+                    extraBlur = isLyricsTab,
+                    rotatingBackgroundEnabled = if (isLyricsTab) showLyricsFluid else rotatingBackgroundEnabled,
+                    lyricsRotatingBackgroundEnabled = lyricsRotatingBackgroundEnabled,
                     fallback = {
                         val staticBlurTransform = remember(currentTab) {
                             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
@@ -2074,7 +2121,7 @@ private fun FullPlayer(
                             decodeSizePx = 200,
                             transformations = staticBlurTransform,
                         )
-                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.52f)))
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (isLyricsTab) 0.40f else 0.52f)))
                         Box(
                             Modifier
                                 .fillMaxSize()
@@ -2245,120 +2292,136 @@ private fun FullPlayer(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 // ── Header: slimmer, calmer, premium ─────────────────────
-                if (!lyricsFullscreen) Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (isTabletLandscape) {
-                                Modifier.widthIn(max = 1200.dp).fillMaxWidth()
-                            } else {
-                                Modifier.adaptiveContentWidth(maxWidth = 640.dp)
-                            }
-                        )
-                        .height(52.dp)
-                        .padding(horizontal = 20.dp)
-                        .playerVerticalSwipe(enabled = currentTab != FullPlayerTab.NOW_PLAYING),
+                val showHeader = !lyricsFullscreen && (currentTab != FullPlayerTab.LYRICS || lyricsControlsVisible || showLyricsOffsetDialog || showTrackMenu)
+                AnimatedVisibility(
+                    visible = showHeader,
+                    enter = fadeIn(tween(200)) + expandVertically(tween(200)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(200)),
                 ) {
-                    // FullPlayer sits on a dark blurred-artwork scrim in both light and
-                    // dark mode, so foreground must use the white overlay palette —
-                    // never MaterialTheme onSurface (near-black in light mode).
-                    IconButton(
-                        onClick = {
-                            if (currentTab != FullPlayerTab.NOW_PLAYING) {
-                                onTabChange(FullPlayerTab.NOW_PLAYING)
-                            } else {
-                                onCollapse()
-                            }
-                        },
-                        modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
-                            .background(
-                                liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
-                            ),
-                    ) {
-                        Icon(
-                            if (currentTab != FullPlayerTab.NOW_PLAYING) Icons.Filled.ArrowBack else Icons.Filled.ExpandMore,
-                            if (currentTab != FullPlayerTab.NOW_PLAYING) "Back to player" else "Minimize player",
-                            modifier = Modifier.size(26.dp),
-                            tint = Color.White.copy(alpha = 0.94f),
-                        )
-                    }
                     Column(
-                        Modifier.align(Alignment.Center).padding(horizontal = 96.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (isTabletLandscape) {
+                                    Modifier.widthIn(max = 1200.dp).fillMaxWidth()
+                                } else {
+                                    Modifier.adaptiveContentWidth(maxWidth = 640.dp)
+                                }
+                            ),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text(
-                            when (currentTab) {
-                                FullPlayerTab.NOW_PLAYING -> "NOW PLAYING"
-                                FullPlayerTab.LYRICS -> "LYRICS"
-                                FullPlayerTab.QUEUE -> "PLAYING QUEUE"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color.White.copy(alpha = 0.95f),
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.9.sp,
-                        )
-                        Text(
-                            if (currentTab == FullPlayerTab.LYRICS) {
-                                "${track.title} • ${track.artist}"
-                            } else {
-                                state.sourceLabel.takeIf { it.isNotBlank() } ?: "LastWave"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.70f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.align(Alignment.CenterEnd),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (currentTab == FullPlayerTab.LYRICS && onSetLyricsOffsetMs != null) {
-                            IconButton(
-                                onClick = { showLyricsOffsetDialog = true },
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .padding(horizontal = if (isTabletLandscape) 32.dp else 20.dp)
+                                .playerVerticalSwipe(enabled = currentTab != FullPlayerTab.NOW_PLAYING),
+                        ) {
+                            // FullPlayer sits on a dark blurred-artwork scrim in both light and
+                            // dark mode, so foreground must use the white overlay palette —
+                            // never MaterialTheme onSurface (near-black in light mode).
+                            LiquidGlassSurface(
+                                onClick = {
+                                    if (currentTab != FullPlayerTab.NOW_PLAYING) {
+                                        onTabChange(FullPlayerTab.NOW_PLAYING)
+                                    } else {
+                                        onCollapse()
+                                    }
+                                },
+                                shape = CircleShape,
+                                color = liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                                contentColor = Color.White.copy(alpha = 0.94f),
+                                glassModifier = Modifier.liquidGlassChrome(
+                                    CircleShape,
+                                    LocalLiquidGlass.current,
+                                    LiquidGlassPreset.FloatingControls,
+                                ),
                                 modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
-                                    .background(
-                                        if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
-                                        else liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
-                                    ),
+                                    .align(Alignment.CenterStart)
+                                    .size(44.dp),
                             ) {
                                 Icon(
-                                    Icons.Filled.Timer,
-                                    contentDescription = stringResource(com.lastwave.app.R.string.player_lyrics_offset_cd),
-                                    modifier = Modifier.size(22.dp),
-                                    tint = if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.94f),
+                                    if (currentTab != FullPlayerTab.NOW_PLAYING) Icons.Filled.ArrowBack else Icons.Filled.ExpandMore,
+                                    if (currentTab != FullPlayerTab.NOW_PLAYING) "Back to player" else "Minimize player",
+                                    modifier = Modifier.size(26.dp),
                                 )
                             }
+                            Column(
+                                Modifier.align(Alignment.Center).padding(horizontal = 96.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    when (currentTab) {
+                                        FullPlayerTab.NOW_PLAYING -> "NOW PLAYING"
+                                        FullPlayerTab.LYRICS -> "LYRICS"
+                                        FullPlayerTab.QUEUE -> "PLAYING QUEUE"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White.copy(alpha = 0.95f),
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.9.sp,
+                                )
+                                Text(
+                                    if (currentTab == FullPlayerTab.LYRICS) {
+                                        "${track.title} • ${track.artist}"
+                                    } else {
+                                        state.sourceLabel.takeIf { it.isNotBlank() } ?: "LastWave"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.70f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (currentTab == FullPlayerTab.LYRICS && onSetLyricsOffsetMs != null) {
+                                    LiquidGlassSurface(
+                                        onClick = { showLyricsOffsetDialog = true },
+                                        shape = CircleShape,
+                                        color = if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                                        else liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                                        contentColor = if (lyricsOffsetMs != 0L) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.94f),
+                                        glassModifier = Modifier.liquidGlassChrome(
+                                            CircleShape,
+                                            LocalLiquidGlass.current,
+                                            LiquidGlassPreset.FloatingControls,
+                                        ),
+                                        modifier = Modifier.size(44.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Timer,
+                                            contentDescription = stringResource(com.lastwave.app.R.string.player_lyrics_offset_cd),
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                }
+                                LiquidGlassSurface(
+                                    onClick = { showTrackMenu = true },
+                                    shape = CircleShape,
+                                    color = liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                                    contentColor = Color.White.copy(alpha = 0.94f),
+                                    glassModifier = Modifier.liquidGlassChrome(
+                                        CircleShape,
+                                        LocalLiquidGlass.current,
+                                        LiquidGlassPreset.FloatingControls,
+                                    ),
+                                    modifier = Modifier.size(44.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Filled.MoreVert,
+                                        "Song options",
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                            }
                         }
-                        IconButton(
-                            onClick = { showTrackMenu = true },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls)
-                                .background(
-                                    liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
-                                ),
-                        ) {
-                            Icon(
-                                Icons.Filled.MoreVert,
-                                "Song options",
-                                modifier = Modifier.size(22.dp),
-                                tint = Color.White.copy(alpha = 0.94f),
-                            )
-                        }
+                        Spacer(Modifier.height(6.dp))
                     }
                 }
-
-                if (!lyricsFullscreen) Spacer(Modifier.height(6.dp))
 
                 AnimatedContent(
                     targetState = currentTab,
@@ -2413,14 +2476,19 @@ private fun FullPlayer(
                                     lyricsFontScale = lyricsFontScale,
                                     onLyricsFontScaleChange = onSetLyricsFontScale ?: {},
                                     controlsAutoHideSeconds = lyricsButtonsAutoHideSeconds,
+                                    controlsVisibleState = lyricsControlsVisible,
+                                    onControlsVisibleChange = { lyricsControlsVisible = it },
                                     translationLanguage = translationLanguage,
                                     onRetry = onRetryLyrics,
+                                    onSelectLyricsProvider = onSelectLyricsProvider,
+                                    onTryAnotherLyricsSource = onTryAnotherLyricsSource,
                                     onToggleFullscreen = { lyricsFullscreen = !lyricsFullscreen },
                                     isFullscreen = lyricsFullscreen,
                                     onOpenLyricsOffset = { showLyricsOffsetDialog = true },
                                     primaryColor = ambientColor,
                                     secondaryColor = ambientCompanion,
                                     tertiaryColor = ambientDeep,
+                                    resolvedArtworkUrl = resolvedAmbientUrl,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .adaptiveContentWidth(maxWidth = if (isTabletLandscape) 960.dp else 720.dp),
@@ -3999,6 +4067,7 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
             signalPath.usbExclusiveActive,
             signalPath.bypassRequested,
             signalPath.internalSession,
+            signalPath.parametricEqActive,
             modeBitPerfect,
         ) {
             val base = qualityBadgeLabel(state)
@@ -4016,7 +4085,17 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
                 signalPath.bypassRequested && !signalPath.usbExclusiveActive -> modeMixer
                 else -> null
             }
-            if (mode != null) "$withRate · $mode" else withRate
+            // AutoEQ: the correction is LastWave's own, so name the route + EQ.
+            val shownMode = if (signalPath.parametricEqActive) {
+                when {
+                    signalPath.internalDirectActive -> "$modeDirect + EQ"
+                    signalPath.usbExclusiveActive -> "USB + EQ"
+                    else -> "EQ"
+                }
+            } else {
+                mode
+            }
+            if (shownMode != null) "$withRate · $shownMode" else withRate
         }
         val isSpatialPill = remember(state.audioCodec) { isSpatialAudioCodec(state.audioCodec) }
         // Atmos gets its own spatial logo — HQ badge is only for lossless, never for spatial.

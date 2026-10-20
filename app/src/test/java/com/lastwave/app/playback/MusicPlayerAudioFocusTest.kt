@@ -50,6 +50,8 @@ class MusicPlayerAudioFocusTest {
             exclusiveUsbOutput = mockk(relaxed = true),
             songPlayStatsRepository = mockk(relaxed = true),
             internalDirectOutput = mockk(relaxed = true),
+            podcastProgressStore = mockk(relaxed = true),
+            autoEqController = mockk(relaxed = true),
         )
         listOf("requestMediaAudioFocus", "abandonMediaAudioFocus").forEach { name ->
             MusicPlayer::class.java.getDeclaredMethod(name).apply { isAccessible = true }.invoke(player)

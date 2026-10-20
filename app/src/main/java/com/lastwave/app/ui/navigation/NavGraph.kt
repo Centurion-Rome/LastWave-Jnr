@@ -293,6 +293,12 @@ fun LastWaveNavHost(
                 onOpenDownloads = {
                     navController.navigate(Screen.Downloads.route)
                 },
+                onOpenPodcasts = {
+                    navController.navigate(Screen.Podcasts.route)
+                },
+                onOpenPodcastShow = { showId ->
+                    navController.navigate(Screen.PodcastShow.createRoute(showId))
+                },
             )
         }
 
@@ -414,7 +420,17 @@ fun LastWaveNavHost(
                     onOpenExcludedSongs = { navController.navigate(Screen.ExcludedSongs.route) },
                     onOpenYouTubeImport = { navController.navigate(Screen.YouTubeImport.route) },
                     onOpenYouTubeLogin = { navController.navigate(Screen.YouTubeLogin.route) },
+                    onOpenSpotifyLogin = { navController.navigate(Screen.SpotifyLogin.route) },
                     onOpenExternalImport = { navController.navigate(Screen.ExternalPlaylistImport.route) },
+                )
+            }
+        }
+
+        composable(Screen.SpotifyLogin.route) {
+            PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+                com.lastwave.app.ui.settings.SpotifyLoginScreen(
+                    onBack = { navController.popBackStack() },
+                    onConnected = { navController.popBackStack() },
                 )
             }
         }
@@ -445,6 +461,9 @@ fun LastWaveNavHost(
                     onBack = { navController.popBackStack() },
                     onImportSuccess = {
                         navController.popBackStack()
+                    },
+                    onOpenSpotifyLogin = {
+                        navController.navigate(Screen.SpotifyLogin.route)
                     },
                 )
             }
@@ -501,6 +520,34 @@ fun LastWaveNavHost(
         composable(Screen.NewReleases.route) {
             PredictiveBackScreen(onBack = { navController.popBackStack() }) {
                 com.lastwave.app.ui.newreleases.NewReleasesScreen(
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+
+        composable(Screen.Podcasts.route) {
+            PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+                com.lastwave.app.ui.podcast.PodcastsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenShow = { showId ->
+                        navController.navigate(Screen.PodcastShow.createRoute(showId))
+                    },
+                )
+            }
+        }
+
+        composable(
+            route = Screen.PodcastShow.route,
+            arguments = listOf(
+                androidx.navigation.navArgument("showId") {
+                    type = androidx.navigation.NavType.StringType
+                },
+            ),
+        ) { backStackEntry ->
+            val showId = backStackEntry.arguments?.getString("showId").orEmpty()
+            PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+                com.lastwave.app.ui.podcast.PodcastShowScreen(
+                    showId = showId,
                     onBack = { navController.popBackStack() },
                 )
             }

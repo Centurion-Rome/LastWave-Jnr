@@ -137,6 +137,7 @@ import com.lastwave.app.ui.navigation.ArtistAlbumNavigator
 import com.lastwave.app.ui.player.LocalMusicPlayer
 import com.lastwave.app.ui.player.PlayingWaveBars
 import com.lastwave.app.ui.shell.FloatingNavDefaults
+import com.lastwave.app.ui.podcast.PodcastShowRow
 
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -152,6 +153,8 @@ fun FeedScreen(
     onOpenDownloads: () -> Unit = {},
     onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
     onOpenNewReleases: () -> Unit = {},
+    onOpenPodcasts: () -> Unit = {},
+    onOpenPodcastShow: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
     artistAlbumNavigator: ArtistAlbumNavigator = hiltViewModel<ArtistAlbumNavBridgeFeed>().navigator,
 ) {
@@ -173,6 +176,7 @@ fun FeedScreen(
     var miniTrayTrack by remember { mutableStateOf<TrackMiniTrayData?>(null) }
     // Sections hidden via Settings → Home sections.
     val hiddenSections by viewModel.hiddenHomeSections.collectAsStateWithLifecycle()
+    val podcastsEnabled by viewModel.podcastsEnabled.collectAsStateWithLifecycle()
     fun isSectionVisible(section: HomeSection) = section.id !in hiddenSections
     val snackbarHostState = remember { SnackbarHostState() }
     val hasFeedContent = with(state.feedData) {
@@ -180,7 +184,8 @@ fun FeedScreen(
             quickPicks.isNotEmpty() || jumpBackIn.isNotEmpty() || recentAlbums.isNotEmpty() ||
             heavyRotation.isNotEmpty() || ytLikedSongs.isNotEmpty() || ytRecentSongs.isNotEmpty() ||
             (becauseYouListenTo?.items?.isNotEmpty() == true) || freshFinds.isNotEmpty() ||
-            spotlight != null || charts.isNotEmpty() || newReleases.isNotEmpty() || friends.isNotEmpty()
+            spotlight != null || charts.isNotEmpty() || newReleases.isNotEmpty() || friends.isNotEmpty() ||
+            podcastShows.isNotEmpty()
     }
     val greeting = remember {
         when (java.time.LocalTime.now().hour) {
@@ -394,6 +399,26 @@ fun FeedScreen(
                         }
                     }
 
+                    if (podcastsEnabled && state.feedData.podcastShows.isNotEmpty()) {
+                        item(key = "podcast_shelf") {
+                            Column(Modifier.padding(vertical = 4.dp)) {
+                                FeedSectionHeader(
+                                    title = state.feedData.podcastShelfTitle
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: stringResource(R.string.podcasts_title),
+                                    actionText = stringResource(R.string.podcasts_see_all),
+                                    actionIcon = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                    onActionClick = onOpenPodcasts,
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                PodcastShowRow(
+                                    shows = state.feedData.podcastShows,
+                                    onShowClick = { show -> onOpenPodcastShow(show.showId) },
+                                )
+                            }
+                        }
+                    }
+
                     // 3. "Your Sound" Section - ALWAYS visible below Quick Access
                     val displayTags = state.feedData.tasteTags.ifEmpty {
                         listOf("Rock", "Indie", "Pop", "Electronic", "Hip-Hop", "R&B", "Synthwave", "Alternative")
@@ -434,7 +459,14 @@ fun FeedScreen(
                                 tracks = state.feedData.quickPicks,
                                 currentPlayingVideoId = playbackState.current?.videoId,
                                 isPlaying = playbackState.isPlaying,
-                                onTrackClick = { index -> viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
+                                onTrackClick = { index ->
+                                    val track = state.feedData.quickPicks.getOrNull(index)
+                                    if (track != null) {
+                                        viewModel.playTrack(track, "Quick Picks")
+                                    } else {
+                                        viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks")
+                                    }
+                                },
                                 onMenuClick = { menuTrack = it },
                                 onLongClick = { track, index ->
                                     miniTrayTrack = TrackMiniTrayData(
@@ -444,7 +476,7 @@ fun FeedScreen(
                                         artworkUrl = track.artworkUrl,
                                         videoId = track.videoId.takeIf(String::isNotBlank),
                                         sourceLabel = "Home",
-                                        onPlay = { viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
+                                        onPlay = { viewModel.playTrack(track, "Quick Picks") },
                                     )
                                 },
                             )
@@ -521,7 +553,7 @@ fun FeedScreen(
                                             subtitle = ArtistHelper.primaryArtist(track.artist),
                                             artworkUrl = track.artworkUrl,
                                             fallbackIcon = Icons.Filled.MusicNote,
-                                            onClick = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                            onClick = { viewModel.playTrack(track, section.title) },
                                             onLongClick = {
                                                 miniTrayTrack = TrackMiniTrayData(
                                                     title = track.title,
@@ -530,10 +562,10 @@ fun FeedScreen(
                                                     artworkUrl = track.artworkUrl,
                                                     videoId = track.videoId.takeIf(String::isNotBlank),
                                                     sourceLabel = "Home",
-                                                    onPlay = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                                    onPlay = { viewModel.playTrack(track, section.title) },
                                                 )
                                             },
-                                            onPlayClick = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                            onPlayClick = { viewModel.playTrack(track, section.title) },
                                         )
                                     }
                                 },
@@ -578,11 +610,11 @@ fun FeedScreen(
                                                             artworkUrl = track.artworkUrl,
                                                             videoId = track.videoId.takeIf(String::isNotBlank),
                                                             sourceLabel = "Home",
-                                                            onPlay = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
+                                                            onPlay = { viewModel.playTrack(track, "Fresh Finds") },
                                                         )
                                                     },
-                                                    onClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
-                                                    onPlayClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
+                                                    onClick = { viewModel.playTrack(track, "Fresh Finds") },
+                                                    onPlayClick = { viewModel.playTrack(track, "Fresh Finds") },
                                                 )
                                             }
                                         },
@@ -826,7 +858,7 @@ fun FeedScreen(
                                     ChartTrackCard(
                                         rank = index + 1,
                                         track = track,
-                                        onClick = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                        onClick = { viewModel.playTrack(track, "Top Charts") },
                                         onLongClick = {
                                             miniTrayTrack = TrackMiniTrayData(
                                                 title = track.title,
@@ -835,7 +867,7 @@ fun FeedScreen(
                                                 artworkUrl = track.artworkUrl,
                                                 videoId = track.videoId.takeIf(String::isNotBlank),
                                                 sourceLabel = "Home",
-                                                onPlay = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                                onPlay = { viewModel.playTrack(track, "Top Charts") },
                                             )
                                         },
                                     )

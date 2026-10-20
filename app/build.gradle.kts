@@ -248,6 +248,7 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.serialization.protobuf)
 
     implementation(libs.retrofit.core)
     implementation(libs.retrofit.kotlinx.serialization)
@@ -348,4 +349,3 @@ val generateNativeSecrets by tasks.registering(Exec::class) {
 tasks.matching { it.name.startsWith("preBuild") || it.name.startsWith("configureCMake") }.configureEach {
     dependsOn(generateNativeSecrets)
 }
-

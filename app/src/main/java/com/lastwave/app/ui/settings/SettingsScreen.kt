@@ -95,14 +95,18 @@ import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BubbleChart
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Waves
 import com.lastwave.app.data.local.LyricsProvider
@@ -301,9 +305,10 @@ private fun getTargetSectionIndex(settingId: String?): Int {
             "Canvas" -> 3
             else -> 0
         }
+        SettingsTab.YOUTUBE -> if (entry.section == "Spotify") 1 else 0
         SettingsTab.LIBRARY -> when (entry.section) {
-            "Imports" -> 1
-            "Modules & Addons" -> 2
+            "Content" -> 1
+            "Imports", "Imports & Addons", "Modules & Addons" -> 2
             else -> 0
         }
         SettingsTab.DATA_BACKUP -> if (entry.section == "Data Management") 1 else 0
@@ -397,8 +402,8 @@ enum class SettingsTab(
     YOUTUBE(
         titleRes = R.string.set_cat_yt,
         subtitleRes = R.string.set_cat_yt_sub,
-        title = "YouTube & Sync",
-        subtitle = "Account connection, 24/7 Library sync, Channels, History",
+        title = "YouTube & Spotify",
+        subtitle = "Account connection, Spotify Canvas, Library sync, Channels",
         icon = Icons.Filled.CloudSync,
     ),
     LAST_FM(
@@ -443,6 +448,7 @@ fun SettingsScreen(
     onOpenYouTubeImport: () -> Unit = {},
     onOpenYouTubeLogin: () -> Unit = {},
     onOpenExternalImport: () -> Unit = {},
+    onOpenSpotifyLogin: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val session by viewModel.session.collectAsStateWithLifecycle()
@@ -493,6 +499,7 @@ fun SettingsScreen(
     var showQualityDialog by remember { mutableStateOf(false) }
     var showDownloadQualityDialog by remember { mutableStateOf(false) }
     var showEqSheet by remember { mutableStateOf(false) }
+    var showAutoEq by remember { mutableStateOf(false) }
     var showLyricsProviderDialog by remember { mutableStateOf(false) }
     var showLyricsOffsetDialog by remember { mutableStateOf(false) }
     var showLyricsSizeDialog by remember { mutableStateOf(false) }
@@ -504,6 +511,7 @@ fun SettingsScreen(
     var showYtLibraryVisibilitySheet by remember { mutableStateOf(false) }
     var showYtChannelSheet by remember { mutableStateOf(false) }
     var showYtDisconnectConfirm by remember { mutableStateOf(false) }
+    var showCookieLoginDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     val currentLanguage = remember(misc.appLanguageTag) { AppLanguage.fromTag(misc.appLanguageTag) }
 
@@ -708,7 +716,11 @@ fun SettingsScreen(
                                             iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
                                             title = stringResource(R.string.set_cat_yt),
-                                            subtitle = if (ytConnection.isConnected) "Connected as ${ytConnection.accountName} \u2022 24/7 sync" else "Connect account, 24/7 playlist sync, channels",
+                                            subtitle = if (ytConnection.isConnected) {
+                                                "Connected as ${ytConnection.accountName} \u2022 Spotify & 24/7 sync"
+                                            } else {
+                                                "YouTube Music & Spotify accounts, Canvas, 24/7 sync"
+                                            },
                                             onClick = { activeTab = SettingsTab.YOUTUBE },
                                             position = position,
                                         )
@@ -974,7 +986,7 @@ fun SettingsScreen(
                         LoudnessMode.ALBUM -> "Album \u2022 Keep intentional album dynamics"
                         else -> "Off \u2022 Play tagged tracks at original level"
                     }
-                    SettingsGroup(rowCount = 9) { index, position ->
+                    SettingsGroup(rowCount = 10) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.Usb,
@@ -1011,10 +1023,10 @@ fun SettingsScreen(
                                     )
                                 },
                                 checked = internalDirectEnabled,
-                                // Greyed out when this output cannot be bypassed, but an
-                                // enabled toggle always stays reachable so it can be turned off.
-                                enabled = internalDirectEnabled || internalDirectAvailability.available ||
-                                    internalDirectAvailability.reason == com.lastwave.app.playback.InternalDirectReason.CHECKING,
+                                // Greyed out only when this device can never bypass the mixer.
+                                // A route- or format-specific refusal must not lock the toggle:
+                                // turning it off used to grey it out until the app restarted.
+                                enabled = internalDirectEnabled || internalDirectAvailability.canEnable,
                                 onCheckedChange = viewModel::setInternalDirectEnabled,
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.internal_direct"),
@@ -1119,6 +1131,16 @@ fun SettingsScreen(
                                 onCheckedChange = viewModel::setClarityAtmosBypass,
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.clarity_spatial_bypass"),
+                            )
+                            9 -> SettingsActionCard(
+                                icon = Icons.Filled.Headphones,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = stringResource(R.string.autoeq_title),
+                                subtitle = com.lastwave.app.ui.settings.autoeq.autoEqSummary(),
+                                onClick = { showAutoEq = true },
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.autoeq"),
                             )
                         }
                     }
@@ -1259,7 +1281,7 @@ fun SettingsScreen(
                         item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_experimental))
-                    SettingsGroup(rowCount = 8) { index, position ->
+                    SettingsGroup(rowCount = 9) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.Lyrics,
@@ -1306,7 +1328,22 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.rotating_background"),
                             )
-                            3 -> SettingsActionCard(
+                            3 -> SettingsToggleCard(
+                                icon = Icons.Filled.RestartAlt,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = stringResource(R.string.settings_lyrics_rotating_background),
+                                subtitle = if (misc.lyricsRotatingBackgroundEnabled) {
+                                    stringResource(R.string.settings_lyrics_rotating_background_on)
+                                } else {
+                                    stringResource(R.string.settings_lyrics_rotating_background_off)
+                                },
+                                checked = misc.lyricsRotatingBackgroundEnabled,
+                                onCheckedChange = viewModel::setLyricsRotatingBackgroundEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "appearance.lyrics_rotating_background"),
+                            )
+                            4 -> SettingsActionCard(
                                 icon = Icons.Filled.Lyrics,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1316,7 +1353,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_provider"),
                             )
-                            4 -> SettingsActionCard(
+                            5 -> SettingsActionCard(
                                 icon = Icons.Filled.Timer,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1334,7 +1371,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_offset"),
                             )
-                            5 -> SettingsActionCard(
+                            6 -> SettingsActionCard(
                                 icon = Icons.Filled.FormatSize,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -1353,7 +1390,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_size"),
                             )
-                            6 -> SettingsActionCard(
+                            7 -> SettingsActionCard(
                                 icon = Icons.Filled.VisibilityOff,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1370,7 +1407,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_autohide"),
                             )
-                            7 -> SettingsActionCard(
+                            8 -> SettingsActionCard(
                                 icon = Icons.Filled.Translate,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -1432,6 +1469,7 @@ fun SettingsScreen(
                     }
                 }
             }
+
                     }
 
                     SettingsTab.YOUTUBE -> {
@@ -1458,19 +1496,11 @@ fun SettingsScreen(
                             it.authUserIndex == ytConnection.authUserIndex &&
                             it.pageId == ytConnection.pageId
                     }?.accountName ?: ytConnection.accountName
-                    val ytRowCount = if (ytConnected) 7 else 2
+                    val ytRowCount = if (ytConnected) 7 else 3
                     SettingsGroup(rowCount = ytRowCount) { index, position ->
-                        when (index) {
-                            0 -> if (ytConnected) {
-                                YouTubeAccountRow(
-                                    accountName = ytConnection.accountName,
-                                    channelHandle = ytConnection.channelHandle,
-                                    onDisconnect = { showYtDisconnectConfirm = true },
-                                    position = position,
-                                    isHighlighted = (highlightedSettingId == "youtube.account"),
-                                )
-                            } else {
-                                SettingsActionCard(
+                        if (!ytConnected) {
+                            when (index) {
+                                0 -> SettingsActionCard(
                                     icon = Icons.Filled.CloudSync,
                                     iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                     iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -1480,20 +1510,49 @@ fun SettingsScreen(
                                     position = position,
                                     isHighlighted = (highlightedSettingId == "youtube.account"),
                                 )
+                                1 -> SettingsActionCard(
+                                    icon = Icons.Filled.Key,
+                                    iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                    iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    title = stringResource(R.string.settings_cookie_login),
+                                    subtitle = stringResource(R.string.settings_cookie_login_sub),
+                                    onClick = { showCookieLoginDialog = true },
+                                    position = position,
+                                    isHighlighted = (highlightedSettingId == "youtube.cookie_login"),
+                                )
+                                2 -> SettingsToggleCard(
+                                    icon = Icons.Filled.CloudSync,
+                                    iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                    iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    title = stringResource(R.string.settings_yt_sync),
+                                    subtitle = syncSubtitle,
+                                    checked = false,
+                                    onCheckedChange = viewModel::setYtSyncEnabled,
+                                    position = position,
+                                    isHighlighted = (highlightedSettingId == "youtube.sync"),
+                                )
                             }
-                            1 -> SettingsToggleCard(
-                                icon = Icons.Filled.CloudSync,
-                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
-                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                title = stringResource(R.string.settings_yt_sync),
-                                subtitle = syncSubtitle,
-                                checked = ytConnected && ytSyncEnabled,
-                                onCheckedChange = viewModel::setYtSyncEnabled,
-                                position = position,
-                                isHighlighted = (highlightedSettingId == "youtube.sync"),
-                            )
-                            2 -> if (ytConnected) {
-                                SettingsActionCard(
+                        } else {
+                            when (index) {
+                                0 -> YouTubeAccountRow(
+                                    accountName = ytConnection.accountName,
+                                    channelHandle = ytConnection.channelHandle,
+                                    onDisconnect = { showYtDisconnectConfirm = true },
+                                    position = position,
+                                    isHighlighted = (highlightedSettingId == "youtube.account"),
+                                )
+                                1 -> SettingsToggleCard(
+                                    icon = Icons.Filled.CloudSync,
+                                    iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                    iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    title = stringResource(R.string.settings_yt_sync),
+                                    subtitle = syncSubtitle,
+                                    checked = ytSyncEnabled,
+                                    onCheckedChange = viewModel::setYtSyncEnabled,
+                                    position = position,
+                                    isHighlighted = (highlightedSettingId == "youtube.sync"),
+                                )
+                                2 -> SettingsActionCard(
                                     icon = Icons.Filled.SwitchAccount,
                                     iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                     iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1506,7 +1565,6 @@ fun SettingsScreen(
                                     position = position,
                                     isHighlighted = (highlightedSettingId == "youtube.channel"),
                                 )
-                            }
                             3 -> if (ytConnected) {
                                 val selectedCount = syncedPlaylistIds?.size ?: allPlaylists.size
                                 val syncCountText = if (syncedPlaylistIds == null || selectedCount == allPlaylists.size) {
@@ -1585,7 +1643,53 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SectionLabel("Spotify")
+                    val spotifyConnected by viewModel.spotifyConnected.collectAsStateWithLifecycle()
+                    val spotifyCanvasEnabled by viewModel.spotifyCanvasEnabled.collectAsStateWithLifecycle()
+                    val spotifySyncLikedEnabled by viewModel.spotifySyncLikedSongsEnabled.collectAsStateWithLifecycle()
+                    SettingsGroup(rowCount = if (spotifyConnected) 3 else 2) { index, position ->
+                        when (index) {
+                            0 -> SettingsActionCard(
+                                icon = Icons.Filled.PlayCircle,
+                                iconContainer = if (spotifyConnected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                iconTint = if (spotifyConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                title = if (spotifyConnected) "Spotify Account Connected" else "Connect Spotify Account",
+                                subtitle = if (spotifyConnected) "Connected (sp_dc). Tap to reconnect or manage session." else "Sign in to enable official Spotify Canvas video loops & library sync",
+                                onClick = onOpenSpotifyLogin,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "spotify.account"),
+                            )
+                            1 -> SettingsToggleCard(
+                                icon = Icons.Filled.SmartDisplay,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = "Spotify Canvas (Looping background videos)",
+                                subtitle = "Fetch and play Spotify's looping visual videos in background",
+                                checked = spotifyCanvasEnabled,
+                                onCheckedChange = viewModel::setSpotifyCanvasEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "spotify.canvas"),
+                            )
+                            2 -> SettingsToggleCard(
+                                icon = Icons.Filled.Favorite,
+                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = "Sync Liked Songs with Spotify",
+                                subtitle = "Automatically like and unlike songs in your Spotify library when favorited in LastWave",
+                                checked = spotifySyncLikedEnabled,
+                                onCheckedChange = viewModel::setSpotifySyncLikedSongsEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "spotify.sync_liked"),
+                            )
+                        }
                     }
+                }
+            }
+        }
 
                     SettingsTab.LAST_FM -> {
                         item {
@@ -1712,6 +1816,29 @@ fun SettingsScreen(
                                             isHighlighted = (highlightedSettingId == "library.excluded_songs"),
                                         )
                                     }
+                                }
+                            }
+                        }
+
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                SectionLabel(stringResource(R.string.settings_section_content))
+                                SettingsGroup(rowCount = 1) { _, position ->
+                                    SettingsToggleCard(
+                                        icon = Icons.Filled.Mic,
+                                        iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                        iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        title = stringResource(R.string.settings_podcasts),
+                                        subtitle = if (misc.podcastsEnabled) {
+                                            stringResource(R.string.settings_podcasts_sub_on)
+                                        } else {
+                                            stringResource(R.string.settings_podcasts_sub_off)
+                                        },
+                                        checked = misc.podcastsEnabled,
+                                        onCheckedChange = viewModel::setPodcastsEnabled,
+                                        position = position,
+                                        isHighlighted = (highlightedSettingId == "library.podcasts"),
+                                    )
                                 }
                             }
                         }
@@ -1996,7 +2123,10 @@ fun SettingsScreen(
                         title = if (updateInfo.isUpdateAvailable) "Update Ready (${updateInfo.latestVersion})" else "Check for Updates",
                         subtitle = when {
                             updateInfo.isChecking -> "Checking GitHub releases..."
-                            updateInfo.isUpdateAvailable -> "Tap to download new version"
+                            updateInfo.isUpdateAvailable -> {
+                                val fileName = updateInfo.downloadFileName
+                                if (!fileName.isNullOrBlank()) "Tap to download $fileName" else "Tap to download new version"
+                            }
                             !updateInfo.message.isNullOrBlank() -> updateInfo.message.orEmpty()
                             else -> "Current version: ${appVersionName(context)}"
                         },
@@ -2064,6 +2194,17 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showYtDisconnectConfirm = false }) { Text(stringResource(R.string.common_cancel)) }
+            },
+        )
+    }
+
+    if (showCookieLoginDialog) {
+        CookieLoginDialog(
+            onDismiss = { showCookieLoginDialog = false },
+            onConnect = { cookies ->
+                viewModel.connectWithCookies(cookies) { success, _ ->
+                    if (success) showCookieLoginDialog = false
+                }
             },
         )
     }
@@ -2180,6 +2321,10 @@ fun SettingsScreen(
             },
             dismissButton = { TextButton(onClick = viewModel::dismissSessionKeyDialog) { Text(stringResource(R.string.common_cancel)) } },
         )
+    }
+
+    if (showAutoEq) {
+        com.lastwave.app.ui.settings.autoeq.AutoEqDialog(onDismiss = { showAutoEq = false })
     }
 
     // -- Experimental 15-band equalizer --

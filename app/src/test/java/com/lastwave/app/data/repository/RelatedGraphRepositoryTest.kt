@@ -60,7 +60,7 @@ class RelatedGraphRepositoryTest {
     fun freshHit_returnsCacheWithoutNetwork() = runTest {
         val now = System.currentTimeMillis()
         seedEdge("seed", "r1", now)
-        seedEdge("seed", "r2", now - 10)
+        seedEdge("seed", "r2", now - 1000L)
 
         val result = repository.relatedFor("seed", limit = 2)
 

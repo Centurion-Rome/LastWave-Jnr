@@ -23,6 +23,10 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.Share
+import com.lastwave.app.ui.player.lyricsshare.ShareLyricsDialog
+import com.lastwave.app.ui.player.lyricsshare.TrackInfo
+import com.lastwave.app.ui.player.lyricsshare.buildLyricsSnapshot
 import kotlin.math.roundToInt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -107,7 +111,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.TransformOrigin
@@ -128,10 +135,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.lastwave.app.data.local.LyricsProvider
 import com.lastwave.app.data.lyrics.LyricLine
 import com.lastwave.app.data.lyrics.LyricSyllable
 import com.lastwave.app.data.lyrics.LyricsTranslation
 import com.lastwave.app.data.lyrics.isRtlText
+import com.lastwave.app.data.lyrics.providerForSource
 import com.lastwave.app.data.lyrics.translationLanguageName
 import com.lastwave.app.data.lyrics.translationWireTarget
 import com.lastwave.app.playback.MusicPlayer
@@ -184,16 +193,25 @@ fun ModernLyricsPanel(
     /** Manual sync correction (ms, + = lyrics earlier). Applies to lyric
      *  focus/highlight only — the seekbar below keeps true position. */
     lyricsOffsetMs: Long = 0L,
-    /** Seconds of inactivity before the floating font-size/fullscreen buttons
-     *  fade out; 0 = Never (always visible). Tap the lyrics to bring them back. */
     controlsAutoHideSeconds: Int = 5,
+    /** Controls auto-hide visibility state (hoisted or internally managed). */
+    controlsVisibleState: Boolean? = null,
+    onControlsVisibleChange: ((Boolean) -> Unit)? = null,
     /** Language the translate button targets; blank = follow the app language. */
     translationLanguage: String = "",
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     secondaryColor: Color = MaterialTheme.colorScheme.secondary,
     tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
+    onSelectLyricsProvider: ((LyricsProvider) -> Unit)? = null,
+    onTryAnotherLyricsSource: (() -> Unit)? = null,
+    resolvedArtworkUrl: String? = null,
 ) {
     state.current ?: return
+
+    var showShareDialog by rememberSaveable { mutableStateOf(false) }
+    val canShareLyrics = lyricsState is LyricsUiState.Success &&
+        !lyricsState.isInstrumental &&
+        (lyricsState.lines.any { it.text.isNotBlank() } || !lyricsState.plainLyrics.isNullOrBlank())
 
     // High-frequency progress is collected ONLY in the leaf hosts below
     // (lyrics list + controls). Collecting it here would recompose the whole
@@ -204,16 +222,22 @@ fun ModernLyricsPanel(
 
     // Floating buttons over the lyrics stay only while the user is active:
     // hide after the configured idle time and bring them back on the first tap.
-    var controlsVisible by remember { mutableStateOf(true) }
+    var internalControlsVisible by remember { mutableStateOf(true) }
+    val controlsVisible = controlsVisibleState ?: internalControlsVisible
+    val setControlsVisible: (Boolean) -> Unit = { visible ->
+        internalControlsVisible = visible
+        onControlsVisibleChange?.invoke(visible)
+    }
     var fontSliderOpen by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(controlsVisible, controlsAutoHideSeconds, fontSliderOpen, isFullscreen) {
-        if (controlsVisible && controlsAutoHideSeconds > 0 && !fontSliderOpen) {
+    var sourceDialogOpen by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(controlsVisible, controlsAutoHideSeconds, fontSliderOpen, sourceDialogOpen, isFullscreen) {
+        if (controlsVisible && controlsAutoHideSeconds > 0 && !fontSliderOpen && !sourceDialogOpen) {
             delay(controlsAutoHideSeconds * 1000L)
-            controlsVisible = false
+            setControlsVisible(false)
         }
     }
     // Entering or leaving lyrics fullscreen starts a fresh visible period.
-    LaunchedEffect(isFullscreen) { controlsVisible = true }
+    LaunchedEffect(isFullscreen) { setControlsVisible(true) }
 
     // On-demand lyric translation / romanization. Work is batched and cached
     // per track and language inside [LyricsTranslation]; the panel owns only
@@ -562,7 +586,7 @@ fun ModernLyricsPanel(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(Unit) { detectTapGestures { controlsVisible = true } },
+                        .pointerInput(Unit) { detectTapGestures { setControlsVisible(true) } },
                 )
             }
         }
@@ -586,6 +610,9 @@ fun ModernLyricsPanel(
             onToggleRomanization = onToggleRomanization,
             showFontSlider = fontSliderOpen,
             onShowFontSliderChange = { fontSliderOpen = it },
+            onOpenLyricsSource = if (onSelectLyricsProvider != null || onTryAnotherLyricsSource != null) {
+                { sourceDialogOpen = true }
+            } else null,
             lyricsFontScale = effectiveFontScale,
             onLyricsFontScaleChange = { newScale ->
                 effectiveFontScale = newScale
@@ -597,13 +624,95 @@ fun ModernLyricsPanel(
             primaryColor = primaryColor,
             secondaryColor = secondaryColor,
             tertiaryColor = tertiaryColor,
+            canShareLyrics = canShareLyrics,
+            onShareLyrics = { showShareDialog = true },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 16.dp, top = 6.dp),
         )
+
+        if (sourceDialogOpen) {
+            val currentSource = (lyricsState as? LyricsUiState.Success)?.source
+            val currentProvider = remember(currentSource) { providerForSource(currentSource) }
+            LyricsSourceDialog(
+                currentSource = currentSource,
+                currentProvider = currentProvider,
+                onSelectProvider = { provider ->
+                    sourceDialogOpen = false
+                    onSelectLyricsProvider?.invoke(provider)
+                },
+                onTryAnotherSource = {
+                    sourceDialogOpen = false
+                    onTryAnotherLyricsSource?.invoke()
+                },
+                onDismiss = { sourceDialogOpen = false },
+            )
+        }
+    }
+
+    if (showShareDialog) {
+        val currentTrack = state.current
+        if (currentTrack != null) {
+            val trackInfo = remember(currentTrack, resolvedArtworkUrl) {
+                TrackInfo(
+                    title = currentTrack.title,
+                    artist = currentTrack.artist,
+                    artworkUrl = currentTrack.artworkUrl,
+                    resolvedArtworkUrl = resolvedArtworkUrl,
+                )
+            }
+            val activeIndex = remember(lyricsState, lyricsOffsetMs) {
+                val lines = (lyricsState as? LyricsUiState.Success)?.lines.orEmpty()
+                if (lines.isNotEmpty()) {
+                    activeLineIndex(lines, progressFlow.value.positionMs + lyricsOffsetMs)
+                } else {
+                    -1
+                }
+            }
+            val snapshot = remember(lyricsState, trackInfo) {
+                buildLyricsSnapshot(lyricsState, trackInfo, activeIndex)
+            }
+            if (snapshot != null) {
+                ShareLyricsDialog(
+                    snapshot = snapshot,
+                    onDismiss = { showShareDialog = false },
+                    primaryColor = primaryColor,
+                )
+            }
+        }
     }
 }
+
+/**
+ * Smoothly melts the top and bottom edges of the lyrics viewport using a hardware-accelerated
+ * offscreen alpha gradient mask (BlendMode.DstIn). Eliminates abrupt hard-edge clipping as
+ * lyrics scroll down toward the bottom player controls.
+ */
+private fun Modifier.lyricsFadingEdge(
+    topFadeDp: androidx.compose.ui.unit.Dp = 36.dp,
+    bottomFadeDp: androidx.compose.ui.unit.Dp = 110.dp,
+): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val topFadePx = topFadeDp.toPx()
+        val bottomFadePx = bottomFadeDp.toPx()
+        val height = size.height
+        if (height > topFadePx + bottomFadePx) {
+            drawRect(
+                brush = Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    (topFadePx / height) to Color.Black,
+                    ((height - bottomFadePx) / height) to Color.Black,
+                    1f to Color.Transparent,
+                    startY = 0f,
+                    endY = height,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+    }
 
 /**
  * Reference lyrics sync list (Metrolist/SimpMusic parity, no gradle canvas).
@@ -687,7 +796,7 @@ private fun ModernSyncedLyricsList(
 
     LazyColumn(
         state = listState,
-        modifier = modifier.clipToBounds(),
+        modifier = modifier.lyricsFadingEdge(topFadeDp = 36.dp, bottomFadeDp = 110.dp),
         contentPadding = PaddingValues(top = 40.dp, bottom = 130.dp, start = 16.dp, end = 16.dp),
         verticalArrangement = Arrangement.spacedBy(26.dp),
     ) {
@@ -1152,6 +1261,7 @@ private fun ModernPlainLyricsView(
         val scrollState = rememberScrollState()
         Column(
             modifier = modifier
+                .lyricsFadingEdge(topFadeDp = 24.dp, bottomFadeDp = 100.dp)
                 .verticalScroll(scrollState)
                 .padding(top = 24.dp, bottom = 90.dp, start = 16.dp, end = 16.dp),
         ) {
@@ -1347,12 +1457,15 @@ private fun ModernLyricsControlsHost(
     onToggleRomanization: () -> Unit = {},
     showFontSlider: Boolean = false,
     onShowFontSliderChange: (Boolean) -> Unit = {},
+    onOpenLyricsSource: (() -> Unit)? = null,
     lyricsFontScale: Float = 1f,
     onLyricsFontScaleChange: (Float) -> Unit = {},
     onLyricsFontScalePreview: (Float) -> Unit = {},
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     secondaryColor: Color = MaterialTheme.colorScheme.secondary,
     tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
+    canShareLyrics: Boolean = false,
+    onShareLyrics: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val progress by progressFlow.collectAsStateWithLifecycle(initialValue = progressInitial)
@@ -1375,12 +1488,15 @@ private fun ModernLyricsControlsHost(
         onToggleRomanization = onToggleRomanization,
         showFontSlider = showFontSlider,
         onShowFontSliderChange = onShowFontSliderChange,
+        onOpenLyricsSource = onOpenLyricsSource,
         lyricsFontScale = lyricsFontScale,
         onLyricsFontScaleChange = onLyricsFontScaleChange,
         onLyricsFontScalePreview = onLyricsFontScalePreview,
         primaryColor = primaryColor,
         secondaryColor = secondaryColor,
         tertiaryColor = tertiaryColor,
+        canShareLyrics = canShareLyrics,
+        onShareLyrics = onShareLyrics,
         modifier = modifier,
     )
 }
@@ -1405,12 +1521,15 @@ private fun ModernLyricsControls(
     onToggleRomanization: () -> Unit = {},
     showFontSlider: Boolean = false,
     onShowFontSliderChange: (Boolean) -> Unit = {},
+    onOpenLyricsSource: (() -> Unit)? = null,
     lyricsFontScale: Float = 1f,
     onLyricsFontScaleChange: (Float) -> Unit = {},
     onLyricsFontScalePreview: (Float) -> Unit = {},
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     secondaryColor: Color = MaterialTheme.colorScheme.secondary,
     tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
+    canShareLyrics: Boolean = false,
+    onShareLyrics: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var sliderPosition by remember(lyricsFontScale) { mutableFloatStateOf(lyricsFontScale) }
@@ -1518,6 +1637,41 @@ private fun ModernLyricsControls(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (onOpenLyricsSource != null) {
+                val sourceInteraction = remember { MutableInteractionSource() }
+                val isSourcePressed by sourceInteraction.collectIsPressedAsState()
+                val sourceScale by animateFloatAsState(
+                    targetValue = if (isSourcePressed) 0.82f else 1.0f,
+                    animationSpec = ExpressiveMotion.spatialSpring(),
+                    label = "sourceBtnScale",
+                )
+                IconButton(
+                    onClick = onOpenLyricsSource,
+                    enabled = controlsVisible,
+                    interactionSource = sourceInteraction,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .graphicsLayer {
+                            scaleX = sourceScale
+                            scaleY = sourceScale
+                        }
+                        .clip(CircleShape)
+                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = sourceInteraction)
+                        .background(
+                            liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                        ),
+                ) {
+                    Icon(
+                        Icons.Filled.Lyrics,
+                        contentDescription = stringResource(R.string.ly_source_cd),
+                        modifier = Modifier.size(22.dp),
+                        tint = Color.White.copy(alpha = 0.90f),
+                    )
+                }
+
+                Spacer(Modifier.width(10.dp))
+            }
+
             // Translation and romanization toggles sit left of the size
             // controls. The active mode's button tints with the theme colour
             // and turns itself off on a second tap; while its request is in
@@ -1615,6 +1769,41 @@ private fun ModernLyricsControls(
             }
 
             Spacer(Modifier.width(10.dp))
+
+            if (canShareLyrics) {
+                val shareInteraction = remember { MutableInteractionSource() }
+                val isSharePressed by shareInteraction.collectIsPressedAsState()
+                val sharePressScale by animateFloatAsState(
+                    targetValue = if (isSharePressed) 0.82f else 1.0f,
+                    animationSpec = ExpressiveMotion.spatialSpring(),
+                    label = "shareBtnScale",
+                )
+                IconButton(
+                    onClick = onShareLyrics,
+                    enabled = controlsVisible,
+                    interactionSource = shareInteraction,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .graphicsLayer {
+                            scaleX = sharePressScale
+                            scaleY = sharePressScale
+                        }
+                        .clip(CircleShape)
+                        .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, interactionSource = shareInteraction)
+                        .background(
+                            liquidGlassContainerColor(Color.White.copy(alpha = 0.14f)),
+                        ),
+                ) {
+                    Icon(
+                        Icons.Filled.Share,
+                        contentDescription = stringResource(R.string.lyshare_button_cd),
+                        modifier = Modifier.size(22.dp),
+                        tint = Color.White.copy(alpha = 0.90f),
+                    )
+                }
+
+                Spacer(Modifier.width(10.dp))
+            }
 
             // Lyrics Font Scale toggle button placed immediately to the LEFT of Full Screen
             val fontInteraction = remember { MutableInteractionSource() }

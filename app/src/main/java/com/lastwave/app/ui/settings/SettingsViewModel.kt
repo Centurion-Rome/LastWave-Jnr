@@ -102,10 +102,12 @@ class SettingsViewModel @Inject constructor(
     private val ytMusicPreferences: com.lastwave.app.data.ytmusic.YtMusicPreferences,
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val downloadedTrackDao: com.lastwave.app.data.local.db.DownloadedTrackDao,
+    private val podcastProgressStore: com.lastwave.app.data.podcast.PodcastProgressStore,
     private val appLocaleManager: com.lastwave.app.util.AppLocaleManager,
     val playlistImportManager: com.lastwave.app.data.playlist.PlaylistImportManager,
     val innerTube: com.lastwave.app.data.music.InnerTubeMusicApi,
     val appUpdateManager: com.lastwave.app.data.update.AppUpdateManager,
+    private val spotifyPreferences: com.lastwave.app.data.spotify.SpotifyPreferences,
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
 ) : ViewModel() {
 
@@ -116,6 +118,36 @@ class SettingsViewModel @Inject constructor(
 
     fun checkForUpdates() = appUpdateManager.checkForUpdate(isSilent = false)
     fun openUpdate(context: android.content.Context) = appUpdateManager.openUpdate(context)
+
+    val spotifyConnected: StateFlow<Boolean> = spotifyPreferences.isConnected
+        .withSettingsFallback("Spotify connection", false)
+        .stateIn(viewModelScope, SettingsSharing, false)
+
+    val spotifyCanvasEnabled: StateFlow<Boolean> = spotifyPreferences.canvasEnabled
+        .withSettingsFallback("Spotify canvas preference", true)
+        .stateIn(viewModelScope, SettingsSharing, true)
+
+    val spotifySyncLikedSongsEnabled: StateFlow<Boolean> = spotifyPreferences.syncLikedSongsEnabled
+        .withSettingsFallback("Spotify sync liked songs preference", true)
+        .stateIn(viewModelScope, SettingsSharing, true)
+
+    fun setSpotifyCanvasEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            spotifyPreferences.setCanvasEnabled(enabled)
+        }
+    }
+
+    fun setSpotifySyncLikedSongsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            spotifyPreferences.setSyncLikedSongsEnabled(enabled)
+        }
+    }
+
+    fun disconnectSpotify() {
+        viewModelScope.launch {
+            spotifyPreferences.clearConnection()
+        }
+    }
 
     /** YouTube Music account connection + playlist-sync state (§ YouTube Music). */
     val ytConnection: StateFlow<com.lastwave.app.data.ytmusic.YtConnection> = ytAuthManager.connection
@@ -575,6 +607,9 @@ class SettingsViewModel @Inject constructor(
 
     fun setLoudnessPreamp(preampDb: Float) =
         launchSettingsAction("update loudness preamp") { loudnessPrefs.setPreampDb(preampDb) }
+    fun setPodcastsEnabled(enabled: Boolean) = launchSettingsAction("update podcasts setting") {
+        settingsPreferences.setPodcastsEnabled(enabled)
+    }
     fun setWordByWordLyrics(enabled: Boolean) = launchSettingsAction("update word-by-word lyrics") { settingsPreferences.setWordByWordLyrics(enabled) }
     fun setLyricsProvider(provider: com.lastwave.app.data.local.LyricsProvider) = launchSettingsAction("update lyrics provider") { settingsPreferences.setLyricsProvider(provider) }
     fun setLyricsOffsetMs(offsetMs: Long) = launchSettingsAction("update lyrics sync offset") {
@@ -592,6 +627,9 @@ class SettingsViewModel @Inject constructor(
     }
     fun setRotatingBackgroundEnabled(enabled: Boolean) = launchSettingsAction("update rotating background") {
         settingsPreferences.setRotatingBackgroundEnabled(enabled)
+    }
+    fun setLyricsRotatingBackgroundEnabled(enabled: Boolean) = launchSettingsAction("update lyrics rotating background") {
+        settingsPreferences.setLyricsRotatingBackgroundEnabled(enabled)
     }
     fun setKeepLyricsScreenAwake(enabled: Boolean) = launchSettingsAction("update keep lyrics screen awake") {
         settingsPreferences.setKeepLyricsScreenAwake(enabled)
@@ -681,7 +719,9 @@ class SettingsViewModel @Inject constructor(
             }
             downloadManager.clearAllDownloads()
             discoverRepository.clearRecommendationExclusions()
+            podcastProgressStore.clear()
             playlistRepository.clearAll()
+            runCatching { ytAuthManager.signOut() }
             // Session last: clearing it navigates to login and can cancel this
             // scope, which used to interrupt the reset halfway through.
             sessionPreferences.clearAll()
@@ -996,9 +1036,45 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun connectWithCookies(rawText: String, onComplete: ((Boolean, String?) -> Unit)? = null) {
+        viewModelScope.launch {
+            val normalized = try {
+                com.lastwave.app.data.ytmusic.CookieNormalizer.normalize(rawText)
+            } catch (e: Exception) {
+                onComplete?.invoke(false, e.message ?: "Invalid cookies. Make sure SAPISID is present.")
+                return@launch
+            }
+            try {
+                ytAuthManager.connect(normalized, "", null, null)
+                kotlinx.coroutines.withTimeoutOrNull(4_000L) { ytAuthManager.awaitLoadedConnection() }
+                runCatching { sessionPreferences.exitGuestMode() }
+                var info: com.lastwave.app.data.music.YtAccountInfo? = null
+                for ((attempt, waitMs) in longArrayOf(0L, 1_200L, 2_500L, 4_000L).withIndex()) {
+                    if (waitMs > 0L) kotlinx.coroutines.delay(waitMs)
+                    info = runCatching { innerTube.fetchAccountInfo() }.getOrNull()
+                    if (info != null) break
+                }
+                val displayName = info?.accountName?.takeIf { it.isNotBlank() } ?: "Google account"
+                if (info != null) {
+                    ytAuthManager.updateAccountIdentity(info.accountName, info.channelHandle, info.photoUrl)
+                }
+                viewModelScope.launch {
+                    runCatching { ytMusicSyncManager.syncNow("connected") }
+                }
+                _uiState.update { it.copy(toastMessage = "Connected as $displayName") }
+                onComplete?.invoke(true, null)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (e: Exception) {
+                onComplete?.invoke(false, e.localizedMessage ?: e.message ?: "Connection failed")
+            }
+        }
+    }
+
     fun disconnectYouTube() {
         launchSettingsAction("disconnect YouTube Music") {
             ytMusicPreferences.setSyncEnabled(false)
+            _ytChannels.value = emptyList()
             ytAuthManager.signOut()
             _uiState.update { it.copy(toastMessage = appContext.getString(com.lastwave.app.R.string.toast_yt_off)) }
         }
