@@ -113,6 +113,8 @@ data class MiscSettings(
      *  the audio session so external equalizer apps / OEM Dolby can process
      *  playback. Bypass routes (USB exclusive, bit-perfect) suspend it. */
     val systemEffectsMode: Boolean = false,
+    /** When true, shows synced music video option in the Now Playing menu (Settings -> Experimental). Off by default. */
+    val musicVideoEnabled: Boolean = false,
     val wordByWordLyrics: Boolean = true,
     /** Preferred lyrics source (Settings -> Experimental -> Lyrics Provider).
      *  AUTO races all providers (fastest valid word-sync wins); an explicit
@@ -175,6 +177,10 @@ data class MiscSettings(
     /** Ids of Home tab sections the user hid ([HomeSection.id]).
      *  Empty = everything visible. Unknown ids are dropped on read. */
     val hiddenHomeSections: Set<String> = emptySet(),
+    /** Titles of YouTube Music shelves the user hid. */
+    val ytMusicHiddenSections: Set<String> = emptySet(),
+    /** Custom order of YouTube Music shelves. */
+    val ytMusicSectionsOrder: List<String> = emptyList(),
     /** When true, Animated Album Canvas motion video loops are displayed. */
     val canvasEnabled: Boolean = true,
     /** When true, portrait motion artwork is displayed edge-to-edge behind player controls. */
@@ -183,9 +189,14 @@ data class MiscSettings(
     val canvasOverCellular: Boolean = true,
     /** When true, anonymous listening telemetry connects to the LastWave Live Global Map. */
     val liveTelemetryEnabled: Boolean = true,
+    /** When true, a liked song is also marked as liked on YouTube Music. */
+    val likedSongsYouTubeSync: Boolean = true,
+    /** When true, a liked song is added to this app's own Liked Songs playlist. */
+    val likedSongsLocalSync: Boolean = true,
     /** When false, podcast shelves, screens and episode search stay hidden.
      *  Existing progress is preserved so re-enabling resumes where you left off. */
     val podcastsEnabled: Boolean = true,
+    val suppressYouTubeLoginPrompt: Boolean = false,
 )
 
 /** Toggleable sections of the Home tab (see FeedScreen). Hero greeting and
@@ -294,10 +305,13 @@ class SettingsPreferences @Inject constructor(
         val DOWNLOAD_TREE_URI = stringPreferencesKey("lw_download_tree_uri")
         val DOWNLOAD_STRUCTURE = stringPreferencesKey("lw_download_structure")
         val SYSTEM_EFFECTS_MODE = booleanPreferencesKey("lw_system_effects_mode")
+        val MUSIC_VIDEO_ENABLED = booleanPreferencesKey("lw_music_video_enabled")
         val USE_ALBUM_ARTIST_FOLDERS = booleanPreferencesKey("lw_use_album_artist_folders")
         val PRIMARY_ARTIST_ONLY = booleanPreferencesKey("lw_primary_artist_only")
         val HIDDEN_HOME_SECTIONS = stringSetPreferencesKey("lw_hidden_home_sections")
         val REORDER_UNLOCKED_PLAYLIST_IDS = stringSetPreferencesKey("lw_reorder_unlocked_playlist_ids")
+        val YT_MUSIC_HIDDEN_SECTIONS = stringSetPreferencesKey("lw_yt_music_hidden_sections")
+        val YT_MUSIC_SECTIONS_ORDER = stringPreferencesKey("lw_yt_music_sections_order")
         val ADDON_URL = stringPreferencesKey("lw_addon_url")
         val ADDON_NAME = stringPreferencesKey("lw_addon_name")
         val ADDON_ENABLED = booleanPreferencesKey("lw_addon_enabled")
@@ -306,7 +320,11 @@ class SettingsPreferences @Inject constructor(
         val CANVAS_FULL_BLEED = booleanPreferencesKey("lw_canvas_full_bleed")
         val CANVAS_OVER_CELLULAR = booleanPreferencesKey("lw_canvas_over_cellular")
         val LIVE_TELEMETRY_ENABLED = booleanPreferencesKey("lw_live_telemetry_enabled")
+        val LIKED_SONGS_YOUTUBE_SYNC = booleanPreferencesKey("lw_liked_songs_youtube_sync")
+        val LIKED_SONGS_LOCAL_SYNC = booleanPreferencesKey("lw_liked_songs_local_sync")
+        val LIKED_SONGS_LOCAL_ONLY = stringPreferencesKey("lw_liked_songs_local_only")
         val PODCASTS_ENABLED = booleanPreferencesKey("lw_podcasts_enabled")
+        val SUPPRESS_YOUTUBE_LOGIN_PROMPT = booleanPreferencesKey("lw_suppress_youtube_login_prompt")
     }
 
     val settings: Flow<MiscSettings> = dataStore.data
@@ -346,6 +364,7 @@ class SettingsPreferences @Inject constructor(
                 losslessQuality = p.readSafely(Keys.LOSSLESS_QUALITY)?.takeIf { it in LOSSLESS_QUALITIES } ?: 27,
                 downloadQuality = p.readSafely(Keys.DOWNLOAD_QUALITY)?.takeIf { it in DOWNLOAD_QUALITIES } ?: 27,
                 systemEffectsMode = p.readSafely(Keys.SYSTEM_EFFECTS_MODE) ?: false,
+                musicVideoEnabled = p.readSafely(Keys.MUSIC_VIDEO_ENABLED) ?: false,
                 isStudioMasterClarityEnabled = p.readSafely(Keys.MUSIC_ENHANCER) ?: true,
                 clarityPreset = p.readSafely(Keys.CLARITY_PRESET)?.takeIf { it in 0..3 } ?: 0,
                 clarityAtmosBypass = p.readSafely(Keys.CLARITY_ATMOS_BYPASS) ?: false,
@@ -376,6 +395,8 @@ class SettingsPreferences @Inject constructor(
                 hiddenHomeSections = p.readSafely(Keys.HIDDEN_HOME_SECTIONS)
                     ?.filter { id -> HomeSection.entries.any { it.id == id } }?.toSet()
                     ?: emptySet(),
+                ytMusicHiddenSections = p.readSafely(Keys.YT_MUSIC_HIDDEN_SECTIONS) ?: emptySet(),
+                ytMusicSectionsOrder = p.readSafely(Keys.YT_MUSIC_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList(),
                 addonUrl = primaryAddon?.url ?: legacyUrl,
                 addonName = primaryAddon?.name ?: legacyName,
                 addonEnabled = primaryAddon?.enabled ?: legacyEnabled,
@@ -384,7 +405,10 @@ class SettingsPreferences @Inject constructor(
                 canvasFullBleed = p.readSafely(Keys.CANVAS_FULL_BLEED) ?: true,
                 canvasOverCellular = p.readSafely(Keys.CANVAS_OVER_CELLULAR) ?: true,
                 liveTelemetryEnabled = p.readSafely(Keys.LIVE_TELEMETRY_ENABLED) ?: true,
+                likedSongsYouTubeSync = p.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true,
+                likedSongsLocalSync = p.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true,
                 podcastsEnabled = p.readSafely(Keys.PODCASTS_ENABLED) ?: true,
+                suppressYouTubeLoginPrompt = p.readSafely(Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT) ?: false,
             )
         }
 
@@ -546,6 +570,10 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.PODCASTS_ENABLED] = enabled }
     }
 
+    suspend fun setSuppressYouTubeLoginPrompt(suppress: Boolean) {
+        dataStore.edit { it[Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT] = suppress }
+    }
+
     suspend fun setPreferLosslessStreaming(enabled: Boolean) {
         dataStore.edit {
             it[Keys.PREFER_LOSSLESS_STREAMING] = enabled
@@ -574,6 +602,10 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setSystemEffectsMode(enabled: Boolean) {
         dataStore.edit { it[Keys.SYSTEM_EFFECTS_MODE] = enabled }
+    }
+
+    suspend fun setMusicVideoEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.MUSIC_VIDEO_ENABLED] = enabled }
     }
 
     suspend fun setStudioMasterClarity(enabled: Boolean) {
@@ -709,6 +741,20 @@ class SettingsPreferences @Inject constructor(
         }
     }
 
+    suspend fun saveYtMusicSections(order: List<String>, hidden: Set<String>) {
+        dataStore.edit { prefs ->
+            prefs[Keys.YT_MUSIC_SECTIONS_ORDER] = order.joinToString("|||")
+            prefs[Keys.YT_MUSIC_HIDDEN_SECTIONS] = hidden
+        }
+    }
+
+    suspend fun resetYtMusicSections() {
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.YT_MUSIC_SECTIONS_ORDER)
+            prefs.remove(Keys.YT_MUSIC_HIDDEN_SECTIONS)
+        }
+    }
+
     /**
      * Synchronous mirror for `attachBaseContext`, which runs before DataStore
      * can deliver a value. commit() on IO: immune to process-kill races and
@@ -753,6 +799,33 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setLiveTelemetryEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.LIVE_TELEMETRY_ENABLED] = enabled }
+    }
+
+    /** Whether a liked song is added to this app's own Liked Songs playlist. */
+    val likedSongsLocalSync: Flow<Boolean> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true }
+
+    /** Whether a liked song is also marked as liked on YouTube Music. */
+    val likedSongsYouTubeSync: Flow<Boolean> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true }
+
+    suspend fun setLikedSongsYouTubeSync(enabled: Boolean) {
+        dataStore.edit { it[Keys.LIKED_SONGS_YOUTUBE_SYNC] = enabled }
+    }
+
+    suspend fun setLikedSongsLocalSync(enabled: Boolean) {
+        dataStore.edit { it[Keys.LIKED_SONGS_LOCAL_SYNC] = enabled }
+    }
+
+    /** The likes kept while the local Liked Songs playlist was switched off, as stored tracks. */
+    val localOnlyLikedTracks: Flow<String> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_LOCAL_ONLY).orEmpty() }
+
+    suspend fun setLocalOnlyLikedTracks(value: String) {
+        dataStore.edit { it[Keys.LIKED_SONGS_LOCAL_ONLY] = value }
     }
 
     private companion object {

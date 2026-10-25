@@ -59,9 +59,9 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
-import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GraphicEq
@@ -159,6 +159,34 @@ enum class PlaylistTrackSort(val labelRes: Int) {
     PLAY_TIME(com.lastwave.app.R.string.pd_sort_playtime),
 }
 
+/**
+ * Remembers each playlist's last track sort (key = playlist id), so leaving
+ * and reopening a playlist keeps e.g. "Date added ↓" instead of resetting to
+ * Custom order. Plain SharedPreferences: tiny, synchronous, read once per open.
+ */
+internal object PlaylistSortMemory {
+    private const val PREFS = "playlist_track_sort"
+
+    fun load(context: android.content.Context, playlistId: Long): Pair<PlaylistTrackSort, Boolean> {
+        val raw = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(playlistId.toString(), null)
+            ?: return PlaylistTrackSort.CUSTOM to true
+        val sort = PlaylistTrackSort.entries.firstOrNull { it.name == raw.substringBefore(':') }
+            ?: return PlaylistTrackSort.CUSTOM to true
+        return sort to (raw.substringAfter(':', "asc") != "desc")
+    }
+
+    fun save(context: android.content.Context, playlistId: Long, sort: PlaylistTrackSort, ascending: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+        if (sort == PlaylistTrackSort.CUSTOM && ascending) {
+            prefs.remove(playlistId.toString())
+        } else {
+            prefs.putString(playlistId.toString(), "${sort.name}:${if (ascending) "asc" else "desc"}")
+        }
+        prefs.apply()
+    }
+}
+
 private fun formatDate(millis: Long): String =
     SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(millis))
 
@@ -205,6 +233,11 @@ fun PlaylistDetailScreen(
     }
 
     val isThisPlaylistPlaying = playbackState.isPlaying && playbackState.sourceLabel == playlist.title
+    val localSongsViewModel: LocalSongsViewModel = hiltViewModel()
+    val localFolders by localSongsViewModel.folders.collectAsStateWithLifecycle()
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) localSongsViewModel.addFolder(uri)
+    }
     var coverEditorOpen by remember { mutableStateOf(false) }
     var coverPickerPending by remember { mutableStateOf(false) }
     val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -221,8 +254,9 @@ fun PlaylistDetailScreen(
     var overflowMenuOpen by remember { mutableStateOf(false) }
     val syncedPlaylistIds by viewModel.syncedPlaylistIds.collectAsStateWithLifecycle()
     var sortMenuOpen by remember { mutableStateOf(false) }
-    var currentSort by remember { mutableStateOf(PlaylistTrackSort.CUSTOM) }
-    var sortAscending by remember { mutableStateOf(true) }
+    val savedSort = remember(playlistId) { PlaylistSortMemory.load(context, playlistId) }
+    var currentSort by remember(playlistId) { mutableStateOf(savedSort.first) }
+    var sortAscending by remember(playlistId) { mutableStateOf(savedSort.second) }
     // Persisted per-playlist reorder lock (absent = locked, the original default).
     val reorderUnlockedIds by viewModel.reorderUnlockedIds.collectAsStateWithLifecycle()
     val isReorderLocked = playlistId.toString() !in reorderUnlockedIds
@@ -517,30 +551,6 @@ fun PlaylistDetailScreen(
                                 fontWeight = FontWeight.Bold,
                             )
                         }
-                        // Locate currently playing song
-                        FilledTonalIconButton(
-                            onClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                val playingIndex = displayTracks.indexOfFirst { track ->
-                                    playbackState.isPlaying &&
-                                    playbackState.current?.title.equals(track.name, ignoreCase = true) &&
-                                    playbackState.current?.artist.equals(track.artist, ignoreCase = true)
-                                }
-                                if (playingIndex != -1) {
-                                    val offset = 1 + (if (!isReorderLocked && !reorderEnabled && !playlist.isYouTubeOnly && displayTracks.size > 1) 1 else 0)
-                                    dragScope.launch {
-                                        listState.animateScrollToItem(playingIndex + offset)
-                                    }
-                                }
-                            },
-                            shape = CircleShape,
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            ),
-                            modifier = Modifier.size(50.dp),
-                        ) {
-                            Icon(Icons.Filled.MyLocation, contentDescription = "Locate playing song", modifier = Modifier.size(22.dp))
-                        }
                         // Locate current song
                         FilledTonalIconButton(
                             onClick = {
@@ -549,7 +559,9 @@ fun PlaylistDetailScreen(
                                 if (playingTrack != null && isThisPlaylistPlaying) {
                                     val index = displayTracks.indexOfFirst { it.name.equals(playingTrack.title, ignoreCase = true) && it.artist.equals(playingTrack.artist, ignoreCase = true) }
                                     if (index >= 0) {
-                                        dragScope.launch { listState.animateScrollToItem(index + 1) } // +1 for the hero section
+                                        // Hero, VU and optional reorder hint precede the tracks.
+                                        val offset = 2 + if (!isReorderLocked && !reorderEnabled && !playlist.isYouTubeOnly && displayTracks.size > 1) 1 else 0
+                                        dragScope.launch { listState.animateScrollToItem(index + offset) }
                                     }
                                 }
                             },
@@ -563,9 +575,9 @@ fun PlaylistDetailScreen(
                         }
                     }
 
-                    if (playlist.mode == LOCAL_SONGS_MODE) {
+                    if (playlist.mode == LOCAL_SONGS_MODE && localFolders.isEmpty() && playlist.tracks.isEmpty()) {
                         Spacer(Modifier.height(14.dp))
-                        LocalSongsPanel(trackCount = playlist.tracks.size)
+                        LocalSongsPanel(trackCount = playlist.tracks.size, viewModel = localSongsViewModel)
                     }
 
                     Spacer(Modifier.height(18.dp))
@@ -656,6 +668,7 @@ fun PlaylistDetailScreen(
                                                 currentSort = option
                                                 sortAscending = option != PlaylistTrackSort.PLAY_TIME
                                             }
+                                            PlaylistSortMemory.save(context, playlistId, currentSort, sortAscending)
                                             sortMenuOpen = false
                                         },
                                     )
@@ -1028,7 +1041,8 @@ fun PlaylistDetailScreen(
                             if (playingTrack != null && isThisPlaylistPlaying) {
                                 val index = displayTracks.indexOfFirst { it.name.equals(playingTrack.title, ignoreCase = true) && it.artist.equals(playingTrack.artist, ignoreCase = true) }
                                 if (index >= 0) {
-                                    dragScope.launch { listState.animateScrollToItem(index + 1) }
+                                    val offset = 2 + if (!isReorderLocked && !reorderEnabled && !playlist.isYouTubeOnly && displayTracks.size > 1) 1 else 0
+                                    dragScope.launch { listState.animateScrollToItem(index + offset) }
                                 }
                             }
                         },
@@ -1096,6 +1110,15 @@ fun PlaylistDetailScreen(
                                 },
                             )
                             val isLocalSongs = playlist.mode == LOCAL_SONGS_MODE
+                            if (isLocalSongs) DropdownMenuItem(
+                                text = { Text("Change selected folder") },
+                                leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    folderPicker.launch(null)
+                                    overflowMenuOpen = false
+                                },
+                            )
                             if (!isLocalSongs) DropdownMenuItem(
                                 text = { Text(stringResource(com.lastwave.app.R.string.pl_download_all)) },
                                 leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
