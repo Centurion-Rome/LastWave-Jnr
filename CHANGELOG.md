@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.3.3] - 2026-10-25
+
+### Changed
+- Merge upstream `Clash-Projects/LastWave-Native` through `03933939`, including
+  refreshed Home cards and filters, navigation improvements, updated player and
+  audio controls, and playlist search and generator controls.
+- Preserve the fork's analog VU meters (including fullscreen), offline download
+  playback and playlist reorder lock.
+- Add the current release summary to Settings → About.
+- Bump the fork to version 4.3.3 (versionCode 33).
+
 ## [4.3.2] - 2026-10-20
 
 ### Changed

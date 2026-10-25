@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Git Tag (e.g., 4.3.2)'
+        description: 'Git Tag (e.g., 4.3.3)'
         required: true
-        default: '4.3.2'
+        default: '4.3.3'
       release_name:
-        description: 'Release Title (e.g., LastWave-Jnr 4.3.2)'
+        description: 'Release Title (e.g., LastWave-Jnr 4.3.3)'
         required: true
-        default: 'LastWave-Jnr 4.3.2'
+        default: 'LastWave-Jnr 4.3.3'
       release_notes:
         description: 'Changelog / Release Notes'
         required: false
@@ -159,15 +159,15 @@ jobs:
 
           | Package | Recommended OS | Description |
           | :--- | :--- | :--- |
-          | **`LastWave-v__TAG__-universal.apk`** (~22 MB) | **Android 10+ (Android 10 – 16+)** | **Standard Recommended Release.** R8-optimized with uncompressed page-aligned native libraries for instant memory mapping. |
-          | **`LastWave-v__TAG__-universal-uncompressed.apk`** (~89 MB) | **Android 10+ (Android 10 – 16+)** | **Raw Release.** Unminified debuggable variant with uncompressed native libraries. |
-          | **`LastWave-v__TAG__-android7.apk`** (~17 MB) | **Android 7.0 – 9.0 (Legacy)** | **Legacy Android 7.0+ Variant.** Built with compressed native libraries for older package managers. |
+          | **`LastWave-Jnr-v__TAG__-universal.apk`** | **Android 10+ (Android 10 – 16+)** | **Standard Recommended Release.** R8-optimized with uncompressed page-aligned native libraries for instant memory mapping. |
+          | **`LastWave-Jnr-v__TAG__-universal-uncompressed.apk`** | **Android 10+ (Android 10 – 16+)** | **Raw Release.** Unminified debuggable variant with uncompressed native libraries. |
+          | **`LastWave-Jnr-v__TAG__-android7.apk`** | **Android 7.0 – 9.0 (Legacy)** | **Legacy Android 7.0+ Variant.** Built with compressed native libraries for older package managers. |
 
           > [!WARNING]
-          > **Notice for Android 7.0 – 9.0 Users (`LastWave-v__TAG__-android7.apk`):**
+          > **Notice for Android 7.0 – 9.0 Users (`LastWave-Jnr-v__TAG__-android7.apk`):**
           > - Hardware GPU glassmorphism / live blur requires Android 12+ and is automatically replaced with translucent dark canvas acrylic styling on older devices.
           > - The media notification uses classic Android media controls rather than Android 13's wavy-progress player.
-          > - For any device running Android 10 or newer, please install the standard **`LastWave-v__TAG__-universal.apk`** for optimal performance and memory efficiency.
+          > - For any device running Android 10 or newer, please install the standard **`LastWave-Jnr-v__TAG__-universal.apk`** for optimal performance and memory efficiency.
           EOF
 
           sed -i "s/__TAG__/${TAG}/g" notice.md

@@ -3109,11 +3109,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.3.2"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.3.3"
 } catch (error: Exception) {
-    "4.3.2"
+    "4.3.3"
 } catch (error: LinkageError) {
-    "4.3.2"
+    "4.3.3"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a
@@ -4502,6 +4502,19 @@ private fun AboutCard(versionName: String) {
             Spacer(Modifier.height(12.dp))
             Text(
                 "Built with the Last.fm API",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                stringResource(R.string.about_release_title, versionName),
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                stringResource(R.string.about_release_notes),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
